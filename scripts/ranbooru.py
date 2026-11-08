@@ -325,8 +325,20 @@ def clear_ranbooru_progress():
         pass
 
 
-def clear_ranbooru_progress_after_preprocessing(callback):
-    """Clear progress after before_process, including when searching fails."""
+def clear_ranbooru_progress_on_error(callback):
+    """Keep the search result visible during sampling, but clear on failure."""
+    @wraps(callback)
+    def wrapped(*args, **kwargs):
+        try:
+            return callback(*args, **kwargs)
+        except Exception:
+            clear_ranbooru_progress()
+            raise
+    return wrapped
+
+
+def clear_ranbooru_progress_after_postprocess(callback):
+    """Release Ranbooru's status when image generation has finished."""
     @wraps(callback)
     def wrapped(*args, **kwargs):
         try:
@@ -2351,7 +2363,7 @@ class Script(scripts.Script):
                     )
 
         return p
-    @clear_ranbooru_progress_after_preprocessing
+    @clear_ranbooru_progress_on_error
     def before_process(
         self,
         p,
@@ -3443,6 +3455,7 @@ class Script(scripts.Script):
                     lora_lock_prev
                 )
 
+    @clear_ranbooru_progress_after_postprocess
     def postprocess(
         self,
         p,
