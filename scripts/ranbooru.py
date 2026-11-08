@@ -12,6 +12,7 @@ import requests_cache
 import json
 import tempfile
 import threading
+from functools import wraps
 
 from modules.processing import (
     process_images,
@@ -307,6 +308,32 @@ def show_ranbooru_progress(message):
     except (AttributeError, RuntimeError):
         # Console logging/generation should still work with alternate WebUI builds.
         pass
+
+def clear_ranbooru_progress():
+    """Release our temporary status before Forge Neo starts sampling.
+
+    Only clear textinfo if it still contains Ranbooru's message: another
+    extension may have published a newer status during preprocessing.
+    """
+    try:
+        state = getattr(shared, 'state', None)
+        if state is not None:
+            textinfo = getattr(state, 'textinfo', None)
+            if isinstance(textinfo, str) and textinfo.startswith('Ranbooru: '):
+                state.textinfo = None
+    except (AttributeError, RuntimeError):
+        pass
+
+
+def clear_ranbooru_progress_after_preprocessing(callback):
+    """Clear progress after before_process, including when searching fails."""
+    @wraps(callback)
+    def wrapped(*args, **kwargs):
+        try:
+            return callback(*args, **kwargs)
+        finally:
+            clear_ranbooru_progress()
+    return wrapped
 
 
 
@@ -2324,6 +2351,7 @@ class Script(scripts.Script):
                     )
 
         return p
+    @clear_ranbooru_progress_after_preprocessing
     def before_process(
         self,
         p,
