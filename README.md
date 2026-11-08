@@ -107,3 +107,8 @@ When you click **Generate** with Ranbooru or LoRAnado enabled, the extension sav
 The booru dropdown now sorts by **most recently used for generation**, not alphabetically or by drag handles. The selected site moves to the top whenever Ranbooru is enabled for Generate, and the order is shared across both tabs in `user/booru_recent.json`. Refresh the browser to load the latest order; previous `user/booru_order.json` custom order is ignored.
 
 While searching, Ranbooru publishes messages such as “Searching danbooru...” and “Processing 201 results” to Forge Neo's built-in progress display via `shared.state.textinfo` (rendered in `.progressDiv` when a generation is active). See [BOORU_RECENT_V8.md](BOORU_RECENT_V8.md) and [DANBOORU_FIX_V5.md](DANBOORU_FIX_V5.md).
+
+
+## Important: back up local credentials before updating
+
+Older versions accidentally tracked files under `user/`. This has been fixed: credentials, saved settings, recent-booru order, and custom tag files are now all local-only. **On the first pull that removes those tracked files, Git can delete your existing local versions.** Back up `user/` before pulling, then restore it afterward. See [USER_DATA.md](USER_DATA.md) for the safe migration commands and recovery advice.
