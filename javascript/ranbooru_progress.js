@@ -1,5 +1,5 @@
-/* Ranbooru status belongs on the left of Forge Neo's progressDiv, while
- * percentage/ETA remains on the right.  Forge Neo rebuilds the bar on every
+/* Ranbooru status belongs on the right of Forge Neo's progressDiv, while
+ * percentage/ETA remains on the left.  Forge Neo rebuilds the bar on every
  * generation and replaces .progress text about twice per second.  Observe
  * those changes rather than patching Forge Neo's requestProgress function.
  */
