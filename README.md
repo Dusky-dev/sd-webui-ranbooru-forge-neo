@@ -96,3 +96,14 @@ Also check my other links:
 - **Personal Website**: https://inzaniak.github.io 
 - **Deviant Art**: https://www.deviantart.com/inzaniak
 - **CivitAI**: https://civitai.com/user/Inzaniak/models
+
+
+## Persistent settings (Forge Neo)
+
+When you click **Generate** with Ranbooru or LoRAnado enabled, the extension saves its controls to `user/last_settings.json`. txt2img and img2img have separate saved values. The settings restore after a Forge Neo restart **and after a browser reload or new tab without restarting the server**. Credentials remain controlled by the existing opt-in credential-saving mechanism; they are not saved into this settings file. See [PERSISTENCE.md](PERSISTENCE.md).
+
+## Recently used boorus & generation progress (v8)
+
+The booru dropdown now sorts by **most recently used for generation**, not alphabetically or by drag handles. The selected site moves to the top whenever Ranbooru is enabled for Generate, and the order is shared across both tabs in `user/booru_recent.json`. Refresh the browser to load the latest order; previous `user/booru_order.json` custom order is ignored.
+
+While searching, Ranbooru publishes messages such as “Searching danbooru...” and “Processing 201 results” to Forge Neo's built-in progress display via `shared.state.textinfo` (rendered in `.progressDiv` when a generation is active). See [BOORU_RECENT_V8.md](BOORU_RECENT_V8.md) and [DANBOORU_FIX_V5.md](DANBOORU_FIX_V5.md).
