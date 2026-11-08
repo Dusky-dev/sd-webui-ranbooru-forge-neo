@@ -1,1 +1,34 @@
-/* Ranbooru v8: v7's sorting controls have been removed. */
+/* Forge Neo's .progressDiv is positioned over the results panel.  Keep its
+ * existing fill width/animation, but position the Ranbooru summary and the
+ * sampling percentage/ETA at opposite sides, irrespective of fill width. */
+.progressDiv > .ranbooru-progress-status,
+.progressDiv > .ranbooru-progress-detail {
+    position: absolute;
+    top: 0;
+    z-index: 3;
+    height: 20px;
+    line-height: 20px;
+    box-sizing: border-box;
+    max-width: calc(50% - 10px);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    pointer-events: none;
+    font-weight: 600;
+    font-size: 12px;
+    color: white;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+}
+
+.progressDiv > .ranbooru-progress-status {
+    left: 4px;
+    padding: 0 5px;
+    text-align: left;
+    background: rgba(0, 0, 0, 0.30);
+    border-radius: 3px;
+}
+
+.progressDiv > .ranbooru-progress-detail {
+    right: 7px;
+    text-align: right;
+}
