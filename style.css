@@ -21,14 +21,14 @@
 }
 
 .progressDiv > .ranbooru-progress-status {
-    left: 4px;
+    right: 7px;
     padding: 0 5px;
-    text-align: left;
+    text-align: right;
     background: rgba(0, 0, 0, 0.30);
     border-radius: 3px;
 }
 
 .progressDiv > .ranbooru-progress-detail {
-    right: 7px;
-    text-align: right;
+    left: 4px;
+    text-align: left;
 }
