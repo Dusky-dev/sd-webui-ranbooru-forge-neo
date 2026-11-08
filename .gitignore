@@ -1,4 +1,7 @@
 .vscode/
 deploy.ps1
-__pycache__
-user
+__pycache__/
+
+# Never commit per-installation settings, credentials, or user tag files.
+# Existing tracked files have been removed from the Git index as well.
+/user/
