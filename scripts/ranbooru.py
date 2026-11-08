@@ -231,6 +231,85 @@ def save_ranbooru_settings(is_img2img, generation_values):
 
 
 
+# Most-recently-used booru order shared by txt2img and img2img.
+# The old v6/v7 manually sorted booru_order.json is intentionally ignored.
+# Only generating with Ranbooru enabled counts as using a booru.
+BOORU_RECENT_FILE = os.path.join(user_data_dir, 'booru_recent.json')
+BOORU_RECENT_LOCK = threading.RLock()
+BOORU_DEFAULT_ORDER = (
+    'safebooru', 'rule34', 'danbooru', 'gelbooru', 'konachan',
+    'yande.re', 'aibooru', 'xbooru', 'e621'
+)
+
+
+def _read_booru_recent_unlocked():
+    """Return valid recent sites, newest first; ignore unknown/duplicate entries."""
+    try:
+        with open(BOORU_RECENT_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        saved = data.get('recent', []) if isinstance(data, dict) else []
+    except FileNotFoundError:
+        saved = []
+    except (OSError, ValueError) as exc:
+        print(f'[Ranbooru] Unable to read recent booru list: {exc}')
+        saved = []
+
+    if not isinstance(saved, list):
+        saved = []
+    seen = set()
+    recent = []
+    for name in saved:
+        if isinstance(name, str) and name in BOORU_DEFAULT_ORDER and name not in seen:
+            seen.add(name)
+            recent.append(name)
+    return recent
+
+
+def load_booru_order():
+    """Show recently generated boorus first, then the original default order."""
+    with BOORU_RECENT_LOCK:
+        recent = _read_booru_recent_unlocked()
+    return recent + [name for name in BOORU_DEFAULT_ORDER if name not in recent]
+
+
+def mark_booru_used(booru):
+    """Record the chosen site once per Generate, never on dropdown browsing."""
+    if booru not in BOORU_DEFAULT_ORDER:
+        return
+    with BOORU_RECENT_LOCK:
+        recent = _read_booru_recent_unlocked()
+        recent = [booru] + [name for name in recent if name != booru]
+        temp_path = None
+        try:
+            fd, temp_path = tempfile.mkstemp(
+                prefix='.booru_recent_', suffix='.tmp', dir=user_data_dir
+            )
+            with os.fdopen(fd, 'w', encoding='utf-8') as out:
+                json.dump({'version': 1, 'recent': recent}, out, indent=2)
+                out.write('\n')
+            os.replace(temp_path, BOORU_RECENT_FILE)
+        except OSError as exc:
+            print(f'[Ranbooru] Unable to save recent booru list: {exc}')
+        finally:
+            if temp_path is not None and os.path.exists(temp_path):
+                try:
+                    os.unlink(temp_path)
+                except OSError:
+                    pass
+
+
+def show_ranbooru_progress(message):
+    """Use Forge Neo's /internal/progress textinfo -> .progressDiv path."""
+    try:
+        state = getattr(shared, 'state', None)
+        if state is not None:
+            state.textinfo = f'Ranbooru: {message}'
+    except (AttributeError, RuntimeError):
+        # Console logging/generation should still work with alternate WebUI builds.
+        pass
+
+
+
 if not os.path.isfile(
     os.path.join(user_search_dir, 'tags_search.txt')
 ):
@@ -354,11 +433,17 @@ def check_exception(booru, parameters):
     if booru == 'e621' and post_id:
         raise Exception("e621 does not support post IDs")
 
-    if booru == 'danbooru' and tags and len(tags.split(',')) > 1:
-        raise Exception(
-            "Danbooru does not support multiple tags. "
-            "You can have only one tag."
-        )
+    # Danbooru's public search limit is normally two tags. Previously Ranbooru
+    # used a slot for its automatic -animated filter, leaving only one for users.
+    # The Danbooru adapter now filters animated posts locally instead.
+    if booru == 'danbooru' and tags:
+        user_tags = [tag.strip() for tag in tags.split(',') if tag.strip()]
+        if len(user_tags) > 2:
+            raise ValueError(
+                '[Ranbooru] Danbooru allows up to two search tags for '
+                'anonymous/basic accounts. Remove excess tags, or use '
+                'an account with a higher search-tag limit.'
+            )
 
 
 class Booru:
@@ -922,74 +1007,135 @@ class Danbooru(Booru):
                 f'?limit={POST_AMOUNT}'
             )
         )
+        # Danbooru asks API clients to identify themselves in User-Agent.
+        self.headers['user-agent'] = 'Ranbooru-Forge-Neo/1.0 (tag prompt extension)'
+
+    @staticmethod
+    def _read_api_json(response, expected_type):
+        """Reject API error objects instead of iterating their string keys.
+
+        Success from /posts.json is a list; /posts/{id}.json is a dict.
+        A failed request can return a dict such as {"success":false,
+        "message":"..."} even when the caller expected a list.
+        """
+        status = getattr(response, 'status_code', 200)
+        try:
+            result = response.json()
+        except ValueError as exc:
+            raise RuntimeError(
+                f'[Ranbooru] Danbooru returned a non-JSON response '
+                f'(HTTP {status}). Check network access or API availability.'
+            ) from exc
+
+        failed = status >= 400 or (
+            isinstance(result, dict) and result.get('success') is False
+        )
+        if failed:
+            details = []
+            if isinstance(result, dict):
+                for key in ('message', 'reason', 'error'):
+                    value = result.get(key)
+                    if isinstance(value, str) and value.strip():
+                        if value.strip() not in details:
+                            details.append(value.strip())
+            message = ' — '.join(details) or 'request rejected'
+            if status == 429:
+                message += '. Rate limit reached; retry later.'
+            elif status in (401, 403):
+                message += '. Check Danbooru access, account permissions, or tag limits.'
+            elif status == 422:
+                message += '. Check your search tags and Danbooru tag limits.'
+            raise RuntimeError(
+                f'[Ranbooru] Danbooru API error (HTTP {status}): {message}'
+            )
+
+        if not isinstance(result, expected_type):
+            if isinstance(result, dict):
+                description = next(
+                    (result[key] for key in ('message', 'reason', 'error')
+                     if isinstance(result.get(key), str) and result[key].strip()),
+                    'unexpected JSON object instead of posts'
+                )
+            else:
+                description = f'unexpected {type(result).__name__} response'
+            raise RuntimeError(
+                f'[Ranbooru] Danbooru API returned invalid data '
+                f'(HTTP {status}): {description}'
+            )
+        return result
+
+    @staticmethod
+    def _normalize_posts(posts):
+        """Keep only valid post records; preserve the extension's 'tags' field."""
+        usable = []
+        for post in posts:
+            if not isinstance(post, dict):
+                print('[Ranbooru] Skipping malformed Danbooru post.')
+                continue
+            tag_string = post.get('tag_string')
+            if not isinstance(tag_string, str):
+                print('[Ranbooru] Skipping Danbooru post without tag_string.')
+                continue
+            # Replaces the old -animated search term without taking a tag slot.
+            if 'animated' in tag_string.split() or post.get('is_animated') is True:
+                continue
+            post['tags'] = tag_string
+            usable.append(post)
+        return usable
 
     def get_data(self, add_tags, max_pages=10, id=''):
         global COUNT
 
-        loop_msg = True
+        if id:
+            add_tags = ''
 
-        # run loop at most twice
-        for loop in range(2):
+        # Danbooru pages are ONE-based. Page 0 is not a valid random page.
+        last_page = max(1, int(max_pages))
+        chosen_page = random.randint(1, last_page)
+        pages = [chosen_page]
+        if chosen_page != 1:
+            pages.append(1)
 
-            if id:
-                add_tags = ''
-
-            url = (
-                f"{self.booru_url}"
-                f"&page={random.randint(0, max_pages - 1)}"
-                f"{id}{add_tags}"
-            )
-
+        for page in pages:
+            url = f'{self.booru_url}&page={page}{id}{add_tags}'
             self.last_url = url
+            try:
+                response = requests.get(url, headers=self.headers, timeout=20)
+            except requests.RequestException as exc:
+                raise RuntimeError(
+                    f'[Ranbooru] Unable to contact Danbooru: {exc}'
+                ) from exc
 
-            res = requests.get(
-                url,
-                headers=self.headers
-            )
+            raw_posts = self._read_api_json(response, list)
+            posts = self._normalize_posts(raw_posts)
+            COUNT = len(posts)
+            if posts:
+                print(f'[Ranbooru] Danbooru: {COUNT} usable posts on page {page}.')
+                return {'post': posts}
+            if page != 1:
+                print('[Ranbooru] Danbooru page had no usable posts; '
+                      'retrying page 1.')
 
-            data = res.json()
-
-            for post in data:
-                post['tags'] = post['tag_string']
-
-            COUNT = len(data)
-
-            if COUNT == 0:
-                max_pages = 2
-
-                # Danbooru does not have a way to know
-                # the amount of results available in the search,
-                # so we need to run the function again
-                # with a fixed amount of pages
-
-                while loop_msg:
-                    print(f" Processing {COUNT} results.")
-                    loop_msg = False
-                    continue
-
-            else:
-                print("Found enough results")
-                break
-
-        return {'post': data}
+        COUNT = 0
+        return {'post': []}
 
     def get_post(self, add_tags, max_pages=10, id=''):
-        url = f"https://danbooru.donmai.us/posts/{id}.json"
-
+        url = f'https://danbooru.donmai.us/posts/{id}.json'
         self.last_url = url
+        try:
+            response = requests.get(url, headers=self.headers, timeout=20)
+        except requests.RequestException as exc:
+            raise RuntimeError(
+                f'[Ranbooru] Unable to contact Danbooru: {exc}'
+            ) from exc
 
-        res = requests.get(
-            url,
-            headers=self.headers
-        )
-
-        data = res.json()
-
-        data['tags'] = data['tag_string']
-        data = {'post': [data]}
-
-        return data
-
+        post = self._read_api_json(response, dict)
+        if not isinstance(post.get('tag_string'), str):
+            raise RuntimeError(
+                '[Ranbooru] Danbooru returned a post without tag_string.'
+            )
+        post['tags'] = post['tag_string']
+        return {'post': [post]}
 
 class e621(Booru):
     def __init__(self):
@@ -1471,21 +1617,13 @@ class Script(scripts.Script):
             elem_id=self.elem_id("ra_enable")
         ) as enabled:
 
+            # Native Gradio dropdown; no drag handles or sorting buttons.
+            # Browser reloads fetch the current MRU order from booru_recent.json.
             booru = gr.Dropdown(
-                [
-                    "safebooru",
-                    "rule34",
-                    "danbooru",
-                    "gelbooru",
-                    "konachan",
-                    'yande.re',
-                    'aibooru',
-                    'xbooru',
-                    'e621'
-                ],
-
+                load_booru_order(),
                 label="Booru",
-                value=selected_booru
+                value=selected_booru,
+                elem_id=self.elem_id('ra_booru'),
             )
 
             max_pages = gr.Slider(
@@ -2000,7 +2138,11 @@ class Script(scripts.Script):
         def restore_browser_page():
             state = load_ranbooru_settings(is_img2img)
             if not state:
-                return [gr.update() for _ in load_outputs]
+                updates = [gr.update() for _ in load_outputs]
+                # The server-side UI stays alive when only the browser reloads.
+                # Restore the current shared order even without a generated state.
+                updates[state_names.index('booru')] = gr.update(choices=load_booru_order())
+                return updates
 
             # The booru determines available rating options and visibility.
             # Refresh both of those together, rather than allowing a delayed
@@ -2014,13 +2156,17 @@ class Script(scripts.Script):
             for name in state_names:
                 widget = state_controls[name]
                 if name not in state and name not in (
-                    'mature_rating', 'fringe_benefits',
+                    'booru', 'mature_rating', 'fringe_benefits',
                     'choose_search_txt', 'choose_remove_txt'
                 ):
                     results.append(gr.update())
                     continue
 
                 value = state.get(name, getattr(widget, 'value', None))
+
+                if name == 'booru':
+                    results.append(gr.update(choices=load_booru_order(), value=current_booru))
+                    continue
 
                 if name == 'mature_rating':
                     value = value if value in rating_choices else 'All'
@@ -2258,6 +2404,10 @@ class Script(scripts.Script):
             requests_cache.uninstall_cache()
 
         if enabled:
+            # MRU is updated only by a genuine Ranbooru generation attempt;
+            # selecting a different site in the dropdown does not change order.
+            mark_booru_used(booru)
+            show_ranbooru_progress(f'Searching {booru}...')
 
             # Handle Gelbooru credentials
             gelbooru_api_key = None
@@ -2537,18 +2687,25 @@ class Script(scripts.Script):
                     else selected_tags
                 )
 
-            add_tags = '&tags=-animated'
-
-            if tags:
-                add_tags += (
-                    f'+{tags.replace(",", "+")}'
-                )
-
-            if mature_rating != 'All':
-                add_tags += (
-                    f'+rating:'
-                    f'{RATINGS[booru][mature_rating]}'
-                )
+            if booru == 'danbooru':
+                # Don't spend a scarce tag slot on -animated: the Danbooru
+                # adapter filters it locally after retrieving the posts.
+                from urllib.parse import quote_plus
+                search_terms = [
+                    tag.strip() for tag in tags.split(',') if tag.strip()
+                ] if tags else []
+                if mature_rating != 'All':
+                    search_terms.append(
+                        f'rating:{RATINGS[booru][mature_rating]}'
+                    )
+                add_tags = '&tags=' + quote_plus(' '.join(search_terms))
+            else:
+                # Preserve the existing request syntax for every other booru.
+                add_tags = '&tags=-animated'
+                if tags:
+                    add_tags += f'+{tags.replace(",", "+")}'
+                if mature_rating != 'All':
+                    add_tags += f'+rating:{RATINGS[booru][mature_rating]}'
 
             # Getting Data
             random_post = {'preview_url': ''}
@@ -2620,6 +2777,14 @@ class Script(scripts.Script):
                     'these tags and rating. Check the tags, rating, post ID, '
                     'or API credentials.'
                 )
+
+            # COUNT is the site-reported result count where supported; for
+            # other adapters it is the number of posts on the fetched page.
+            # A post-ID lookup should always report the one requested post.
+            results_count = len(clean_posts) if post_id else COUNT
+            if type(results_count) is not int or results_count < len(clean_posts):
+                results_count = len(clean_posts)
+            show_ranbooru_progress(f'Processing {results_count} results')
 
             # Sort based on sorting_order
             if sorting_order == 'High Score':
