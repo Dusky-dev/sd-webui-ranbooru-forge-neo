@@ -6,8 +6,9 @@
 - The old `user/booru_order.json` is ignored.
 - Browser refresh/new tab reloads the order from disk. Already-open pages do not reorder until reloaded.
 - Search and result-count status is reported through Forge Neo's `shared.state.textinfo`, which appears inside its native `.progressDiv` during generation. The display depends on Forge Neo's progress-bar setting.
-- These messages are temporary: Ranbooru clears them when its `before_process` hook exits, before normal sampling progress/ETA starts. Error paths also clear the message. Other extensions' newer status text is preserved.
+- The `javascript/ranbooru_progress.js` overlay displays Ranbooru's status on the **left** side of `.progressDiv`, and Forge Neo's **percentage/ETA on the right**. The progress fill width and animation remain unchanged. On narrow bars, labels truncate instead of overlapping.
+- The status stays available during sampling and clears when `postprocess` finishes, or immediately on preprocessing failure. The progress bar/overlays themselves disappear when Forge Neo ends the task. Another extension's newer status text is not overwritten.
 
 ## Upgrading from v7
 
-Install the updated extension code while keeping `user/`, then restart the WebUI process once. The no-op `javascript/booru_sort.js` and `style.css` replace obsolete v7 drag-sort assets so those UI controls no longer appear. Generating with a booru, then refreshing the page, should put that booru first.
+Install the updated extension code while keeping `user/`, then restart the WebUI process once. The no-op `javascript/booru_sort.js` and updated `style.css` replace obsolete v7 drag-sort assets so those UI controls no longer appear. Generating with a booru, then refreshing the page, should put that booru first.
