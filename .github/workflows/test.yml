@@ -1,0 +1,25 @@
+name: Ranbooru source tests
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Compile Python sources
+        run: python -m compileall -q scripts/ranbooru.py tests
+      - name: Run mocked API and progress regression tests
+        run: python -m unittest discover -s tests -v
+      - name: Check JavaScript syntax
+        run: node --check javascript/ranbooru_progress.js
+      - name: Test progress bar overlay
+        run: node tests/test_progress_overlay.js
