@@ -112,3 +112,8 @@ While searching, Ranbooru publishes messages such as “Searching danbooru...”
 ## Important: back up local credentials before updating
 
 Older versions accidentally tracked files under `user/`. This has been fixed: credentials, saved settings, recent-booru order, and custom tag files are now all local-only. **On the first pull that removes those tracked files, Git can delete your existing local versions.** Back up `user/` before pulling, then restore it afterward. See [USER_DATA.md](USER_DATA.md) for the safe migration commands and recovery advice.
+
+
+## Gelbooru API error handling
+
+Ranbooru checks HTTP responses before parsing Gelbooru JSON and reports actionable errors for authentication, HTML challenge pages, and invalid API data. Temporary failures are retried up to three requests with bounded backoff. See [GELBOORU_API_FIX.md](GELBOORU_API_FIX.md). Credentials remain local; please do not upload `user/credentials/credentials.json`.
