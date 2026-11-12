@@ -12,6 +12,7 @@ import requests_cache
 import json
 import tempfile
 import threading
+import time
 from functools import wraps
 
 from modules.processing import (
@@ -503,12 +504,12 @@ class Booru:
 
 
 class Gelbooru(Booru):
-    def __init__(
-        self,
-        fringe_benefits,
-        api_key=None,
-        user_id=None
-    ):
+    """Gelbooru API adapter with bounded retries and validated JSON responses."""
+
+    RETRYABLE_STATUSES = (429, 500, 502, 503, 504)
+    RETRY_DELAYS = (1, 2)
+
+    def __init__(self, fringe_benefits, api_key=None, user_id=None):
         super().__init__(
             'gelbooru',
             (
@@ -517,82 +518,169 @@ class Gelbooru(Booru):
                 f'&json=1&limit={POST_AMOUNT}'
             )
         )
-
         self.fringeBenefits = fringe_benefits
         self.api_key = api_key
         self.user_id = user_id
+        self.headers = {'User-Agent': 'Ranbooru-Forge-Neo/1.0'}
+
+    def _fetch_json(self, url):
+        """Fetch and validate a post page, without exposing credentials in logs.
+
+        Auth parameters are deliberately separate from self.last_url, and no
+        exception contains a request URL (requests would include the API key).
+        """
+        auth = (
+            {'api_key': self.api_key, 'user_id': self.user_id}
+            if self.api_key and self.user_id else None
+        )
+        cookies = {'fringeBenefits': 'yup'} if self.fringeBenefits else None
+
+        for attempt in range(3):
+            try:
+                response = requests.get(
+                    url,
+                    params=auth,
+                    cookies=cookies,
+                    headers=self.headers,
+                    timeout=20,
+                )
+            except requests.exceptions.RequestException:
+                if attempt < 2:
+                    time.sleep(self.RETRY_DELAYS[attempt])
+                    continue
+                raise RuntimeError(
+                    '[Ranbooru] Gelbooru network request failed after '
+                    '3 attempts. Check your connection and try again.'
+                ) from None
+
+            status = response.status_code
+            if status in (401, 403):
+                raise RuntimeError(
+                    f'[Ranbooru] Gelbooru API denied access (HTTP {status}). '
+                    'Check your Gelbooru API key and user ID in Ranbooru settings; '
+                    'Gelbooru can require authentication even for searches.'
+                )
+            if status in self.RETRYABLE_STATUSES:
+                if attempt < 2:
+                    time.sleep(self.RETRY_DELAYS[attempt])
+                    continue
+                raise RuntimeError(
+                    f'[Ranbooru] Gelbooru API temporarily unavailable '
+                    f'(HTTP {status}) after 3 attempts. Try again later.'
+                )
+            if status >= 400:
+                raise RuntimeError(
+                    f'[Ranbooru] Gelbooru API rejected the request '
+                    f'(HTTP {status}). Check your search tags and API access.'
+                )
+
+            try:
+                data = response.json()
+            except ValueError:
+                # HTML login/challenge/error pages are not transient JSON errors.
+                content_type = response.headers.get('Content-Type', '').lower()
+                prefix = (response.text or '').lstrip()[:120].lower()
+                if 'html' in content_type or prefix.startswith(('<!doctype', '<html')):
+                    raise RuntimeError(
+                        '[Ranbooru] Gelbooru returned an HTML page instead of '
+                        'JSON. API access may be blocked or require a valid '
+                        'Gelbooru API key and user ID.'
+                    ) from None
+                if attempt < 2:
+                    time.sleep(self.RETRY_DELAYS[attempt])
+                    continue
+                raise RuntimeError(
+                    '[Ranbooru] Gelbooru returned empty or invalid JSON after '
+                    '3 attempts. The API may be temporarily unavailable.'
+                ) from None
+
+            if isinstance(data, dict) and str(data.get('success', '')).lower() == 'false':
+                raise RuntimeError(
+                    '[Ranbooru] Gelbooru reported a failed API search. '
+                    'Its search service may be down, or the query may be '
+                    'restricted. Try again later or check your tags.'
+                )
+
+            # Gelbooru normally returns @attributes/count and a list of posts.
+            # Empty list responses are also accepted as a no-results search.
+            if data == []:
+                data = {'@attributes': {'count': 0}, 'post': []}
+            if not isinstance(data, dict):
+                raise RuntimeError(
+                    '[Ranbooru] Gelbooru returned an unexpected JSON format '
+                    'instead of a post-list object.'
+                )
+
+            attributes = data.get('@attributes')
+            if not isinstance(attributes, dict):
+                raise RuntimeError(
+                    '[Ranbooru] Gelbooru response has no valid post count. '
+                    'The API response format may have changed.'
+                )
+            try:
+                count = int(attributes.get('count'))
+                if count < 0:
+                    raise ValueError
+            except (TypeError, ValueError):
+                raise RuntimeError(
+                    '[Ranbooru] Gelbooru returned an invalid post count.'
+                ) from None
+
+            posts = data.get('post', [])
+            if isinstance(posts, dict):
+                posts = [posts]
+            if not isinstance(posts, list):
+                raise RuntimeError(
+                    '[Ranbooru] Gelbooru returned an invalid posts collection.'
+                )
+            data['post'] = [post for post in posts if isinstance(post, dict)]
+            return data, count
+
+        raise RuntimeError('[Ranbooru] Gelbooru search failed after retries.')
 
     def get_data(self, add_tags, max_pages=10, id=''):
         global COUNT
 
-        loop_msg = True
+        if id:
+            add_tags = ''
+        requested_pages = max(1, int(max_pages))
+        page = random.randrange(requested_pages) if not id else 0
 
-        # run loop at most twice
-        for loop in range(2):
-
-            if id:
-                add_tags = ''
-
-            # Build the API URL with credentials if available
-            api_params = (
-                f"&pid={random.randint(0, max_pages - 1)}"
-                f"{id}{add_tags}"
-            )
-
-            if self.api_key and self.user_id:
-                api_params += (
-                    f"&api_key={self.api_key}"
-                    f"&user_id={self.user_id}"
-                )
-
-            url = f"{self.booru_url}{api_params}"
-
+        def fetch_page(page_number):
+            # Never persist or print an authenticated URL.
+            url = f'{self.booru_url}&pid={page_number}{id}{add_tags}'
             self.last_url = url
+            return self._fetch_json(url)
 
-            # The randint function is an alias to randrange(a, b+1),
-            # so 'max_pages' should be passed as 'max_pages-1'
-            if self.fringeBenefits:
-                res = requests.get(
-                    url,
-                    cookies={'fringeBenefits': 'yup'}
-                )
+        data, COUNT = fetch_page(page)
 
-            else:
-                res = requests.get(url)
+        if id:
+            return data
 
-            data = res.json()
+        # The selected page can be beyond the last actual page if the user
+        # requests more pages than are available. Retry a valid random page,
+        # or the first page when a sparse page returns no posts.
+        available_pages = max(1, (COUNT + POST_AMOUNT - 1) // POST_AMOUNT)
+        if COUNT and (page >= available_pages or not data['post']):
+            valid_page = (
+                random.randrange(available_pages)
+                if page >= available_pages else 0
+            )
+            data, COUNT = fetch_page(valid_page)
 
-            COUNT = data['@attributes']['count']
-
-            if COUNT <= max_pages * POST_AMOUNT:
-                max_pages = COUNT // POST_AMOUNT + 1
-
-                # If max_pages is bigger than available pages,
-                # loop the function with updated max_pages
-                # based on the value of COUNT
-
-                while loop_msg:
-                    print(f" Processing {COUNT} results.")
-                    loop_msg = False
-                    continue
-
-            else:
-                print(
-                    f" Processing "
-                    f"{max_pages * POST_AMOUNT} "
-                    f"out of {COUNT} results."
-                )
-
-                break
-
+        if COUNT > requested_pages * POST_AMOUNT:
+            print(
+                f' Processing up to {requested_pages * POST_AMOUNT} '
+                f'out of {COUNT} results.'
+            )
+        else:
+            print(f' Processing {COUNT} results.')
         return data
 
     def get_post(self, add_tags, max_pages=10, id=''):
-        return self.get_data(
-            add_tags,
-            max_pages,
-            "&id=" + id
-        )
+        return self.get_data(add_tags, max_pages, '&id=' + str(id))
+
+
 class XBooru(Booru):
     def __init__(self):
         super().__init__(
