@@ -28,3 +28,17 @@ python -m unittest tests.test_gelbooru_api -v
 The tests use mocked HTTP responses and do not make live calls to Gelbooru. Live API behavior still depends on site access, throttling and whether account credentials are valid.
 
 See [USER_DATA.md](USER_DATA.md) for how to keep your credentials local and safe from `git pull`.
+
+## Why tag search may fail while post ID works
+
+Gelbooru started requiring `api_key` and `user_id` for many API requests in June 2025. The website's own API documentation states that API authentication may be required. A post-ID lookup working **does not prove** that tag-search access is permitted.
+
+If you previously updated from a Git version that tracked `user/credentials/credentials.json`, your saved keys may have been replaced. The repository has since stopped tracking `user/`, but that does not restore lost credentials.
+
+Ranbooru now logs one of two **non-secret** statuses when Gelbooru is selected:
+
+- `Gelbooru API credentials: MISSING/INCOMPLETE (search is anonymous)` — re-enter both your API key and numeric user ID in the Gelbooru settings, and enable **Save credentials** before generating.
+- `Gelbooru API credentials: key and user ID supplied` — the credentials were sent. If the tag search still returns HTML, verify the pair, try **Max pages = 1** with a simple tag, and check for temporary Gelbooru restrictions.
+
+In both cases, the error message distinguishes anonymous vs authenticated failures, and neither the log nor the exception reveals the actual secret.
+
