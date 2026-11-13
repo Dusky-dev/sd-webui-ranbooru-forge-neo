@@ -120,6 +120,40 @@ class GelbooruResponseTests(unittest.TestCase):
             self.adapter.get_data("", 1)
         self.assertEqual(len(self.requests.calls), 1)
 
+    def test_missing_credentials_reported_for_html_page(self):
+        self.requests.responses = [
+            Response(status=200, text="<html>Blocked</html>",
+                     content_type="text/html", invalid_json=True)
+        ]
+        with self.assertRaisesRegex(RuntimeError, "No API key/user ID pair was sent"):
+            self.adapter.get_data("&tags=landscape", 1)
+        self.assertEqual(len(self.requests.calls), 1)
+
+    def test_missing_credentials_reported_for_401(self):
+        self.requests.responses = [Response(status=401)]
+        with self.assertRaisesRegex(RuntimeError, "No API key/user ID pair was sent"):
+            self.adapter.get_data("&tags=landscape", 1)
+
+    def test_authenticated_html_explains_search_restrictions_without_secrets(self):
+        self.adapter = self.namespace["Gelbooru"](False, "secret-abc", "uid-456")
+        self.requests.responses = [
+            Response(status=200, text="<html>Challenge</html>",
+                     content_type="text/html", invalid_json=True)
+        ]
+        with self.assertRaisesRegex(RuntimeError, "even though an API key and user ID") as caught:
+            self.adapter.get_data("&tags=landscape", 1)
+        self.assertNotIn("secret-abc", str(caught.exception))
+        self.assertNotIn("uid-456", str(caught.exception))
+        self.assertIn("Max pages = 1", str(caught.exception))
+
+    def test_authenticated_401_reports_rejected_pair_without_secret(self):
+        self.adapter = self.namespace["Gelbooru"](False, "secret-abc", "uid-456")
+        self.requests.responses = [Response(status=401)]
+        with self.assertRaisesRegex(RuntimeError, "even though an API key and user ID") as caught:
+            self.adapter.get_data("&tags=landscape", 1)
+        self.assertNotIn("secret-abc", str(caught.exception))
+        self.assertNotIn("uid-456", str(caught.exception))
+
     def test_429_retries_then_recovers(self):
         self.requests.responses = [Response(status=429), posts_result()]
         self.assertEqual(len(self.adapter.get_data("", 1)["post"]), 1)
