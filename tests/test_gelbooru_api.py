@@ -3,9 +3,11 @@
     python -m unittest discover -s tests -v
 """
 import ast
+import io
 import random
 import types
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 
 
@@ -211,14 +213,93 @@ class GelbooruResponseTests(unittest.TestCase):
         result = self.adapter.get_data("", 1)
         self.assertEqual(result["post"], [{"id": 1}])
 
-    def test_invalid_page_falls_back_to_valid_page(self):
-        pages = iter([9, 1])
-        self.namespace["random"].randrange = lambda count: next(pages)
-        self.requests.responses = [posts_result(count=201, posts=[]), posts_result(count=201)]
-        result = self.adapter.get_data("", 10)
+    def test_page_selection_is_capped_by_actual_result_count(self):
+        requested_ranges = []
+        def last_page(count):
+            requested_ranges.append(count)
+            return count - 1
+        self.namespace["random"].randrange = last_page
+        self.requests.responses = [posts_result(count=201), posts_result(count=201)]
+        result = self.adapter.get_data("", 50)
         self.assertEqual(len(result["post"]), 1)
-        self.assertIn("&pid=9", self.requests.calls[0][0])
-        self.assertIn("&pid=1", self.requests.calls[1][0])
+        self.assertEqual(requested_ranges, [3])
+        self.assertIn("&pid=0", self.requests.calls[0][0])
+        self.assertIn("&pid=2", self.requests.calls[1][0])
+
+    def test_html_on_deeper_page_uses_valid_page_zero(self):
+        self.namespace["random"].randrange = lambda count: 2
+        self.requests.responses = [
+            posts_result(count=201),
+            Response(status=200, text="<html>challenge</html>",
+                     content_type="text/html", invalid_json=True),
+        ]
+        with redirect_stdout(io.StringIO()) as out:
+            result = self.adapter.get_data("&tags=cat_ears", 20)
+        self.assertEqual(result["post"][0]["id"], 1)
+        self.assertEqual(self.namespace["COUNT"], 201)
+        self.assertEqual(len(self.requests.calls), 2)
+        self.assertIn("&pid=0", self.requests.calls[0][0])
+        self.assertIn("&pid=2", self.requests.calls[1][0])
+        self.assertIn("falling back to validated page=0", out.getvalue())
+        self.assertIn("page=2 HTTP=200 response=HTML", out.getvalue())
+
+    def test_html_on_page_zero_still_reports_api_error(self):
+        self.requests.responses = [
+            Response(status=200, text="<html>challenge</html>",
+                     content_type="text/html", invalid_json=True)
+        ]
+        with self.assertRaisesRegex(RuntimeError, "HTML page instead of JSON"):
+            self.adapter.get_data("&tags=cat_ears", 20)
+        self.assertEqual(len(self.requests.calls), 1)
+
+    def test_empty_deeper_page_falls_back_to_page_zero(self):
+        self.namespace["random"].randrange = lambda count: 1
+        self.requests.responses = [posts_result(count=300), posts_result(count=300, posts=[])]
+        with redirect_stdout(io.StringIO()) as out:
+            result = self.adapter.get_data("&tags=cat_ears", 20)
+        self.assertEqual(len(result["post"]), 1)
+        self.assertEqual(len(self.requests.calls), 2)
+        self.assertIn("falling back to page=0", out.getvalue())
+
+    def test_max_pages_one_only_requests_page_zero(self):
+        self.namespace["random"].randrange = lambda count: 0
+        self.requests.responses = [posts_result(count=1000)]
+        self.adapter.get_data("", 1)
+        self.assertEqual(len(self.requests.calls), 1)
+        self.assertIn("&pid=0", self.requests.calls[0][0])
+
+    def test_selected_page_success_uses_deeper_results(self):
+        self.namespace["random"].randrange = lambda count: 1
+        second = posts_result(count=850, posts=[{"id": 999, "tags": "second"}])
+        self.requests.responses = [posts_result(count=850), second]
+        result = self.adapter.get_data("&tags=test", 5)
+        self.assertEqual(result["post"][0]["id"], 999)
+        self.assertEqual(self.namespace["COUNT"], 850)
+        self.assertEqual(len(self.requests.calls), 2)
+
+    def test_logging_does_not_expose_credentials_or_response_body(self):
+        self.adapter = self.namespace["Gelbooru"](False, "my-SUPER-secret-key", "UID-123")
+        self.namespace["random"].randrange = lambda count: 1
+        self.requests.responses = [
+            posts_result(count=250),
+            Response(status=200, text="<html>my-SUPER-secret-key</html>",
+                     content_type="text/html", invalid_json=True),
+        ]
+        with redirect_stdout(io.StringIO()) as out:
+            result = self.adapter.get_data("&tags=cat_ears", 9)
+        self.assertTrue(result["post"])
+        logs = out.getvalue()
+        self.assertIn("page=0 HTTP=200 response=JSON", logs)
+        self.assertIn("page=1 HTTP=200 response=HTML", logs)
+        self.assertIn("selected_page=1", logs)
+        self.assertNotIn("my-SUPER-secret-key", logs)
+        self.assertNotIn("UID-123", logs)
+        self.assertNotIn("my-SUPER-secret-key", self.adapter.last_url)
+
+    def test_zero_matches_keeps_single_request(self):
+        self.requests.responses = [posts_result(count=0, posts=[])]
+        self.assertEqual(self.adapter.get_data("&tags=impossible", 500)["post"], [])
+        self.assertEqual(len(self.requests.calls), 1)
 
     def test_post_id_search_is_single_request(self):
         self.requests.responses = [posts_result(count=1)]
