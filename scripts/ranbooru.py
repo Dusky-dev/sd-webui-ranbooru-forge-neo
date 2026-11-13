@@ -509,6 +509,10 @@ class Gelbooru(Booru):
     RETRYABLE_STATUSES = (429, 500, 502, 503, 504)
     RETRY_DELAYS = (1, 2)
 
+    class HTMLResponseError(RuntimeError):
+        """A Gelbooru page returned HTML instead of JSON."""
+
+
     def __init__(self, fringe_benefits, api_key=None, user_id=None):
         super().__init__(
             'gelbooru',
@@ -523,7 +527,7 @@ class Gelbooru(Booru):
         self.user_id = user_id
         self.headers = {'User-Agent': 'Ranbooru-Forge-Neo/1.0'}
 
-    def _fetch_json(self, url):
+    def _fetch_json(self, url, page_number=None):
         """Fetch and validate a post page, without exposing credentials in logs.
 
         Auth parameters are deliberately separate from self.last_url, and no
@@ -554,6 +558,19 @@ class Gelbooru(Booru):
                 ) from None
 
             status = response.status_code
+            # Log only bounded diagnostics, never URLs, bodies, or credentials.
+            content_type = response.headers.get('Content-Type', '').lower()
+            sample = (response.text or '').lstrip()[:32].lower()
+            response_kind = (
+                'HTML' if 'html' in content_type or sample.startswith(('<html', '<!doctype'))
+                else 'JSON' if 'json' in content_type
+                else 'other'
+            )
+            print(
+                f'[Ranbooru] Gelbooru page={page_number} '
+                f'HTTP={status} response={response_kind} '
+                f'attempt={attempt + 1}/3'
+            )
             if status in (401, 403):
                 if not auth:
                     raise RuntimeError(
@@ -589,7 +606,7 @@ class Gelbooru(Booru):
                 prefix = (response.text or '').lstrip()[:120].lower()
                 if 'html' in content_type or prefix.startswith(('<!doctype', '<html')):
                     if not auth:
-                        raise RuntimeError(
+                        raise self.HTMLResponseError(
                             '[Ranbooru] Gelbooru returned an HTML page instead of JSON '
                             f'(HTTP {status}). No API key/user ID pair was sent. '
                             'Gelbooru may allow post-ID lookups but require '
@@ -597,7 +614,7 @@ class Gelbooru(Booru):
                             'values under Gelbooru credentials; select '
                             '"Save credentials" to retain them after restart.'
                         ) from None
-                    raise RuntimeError(
+                    raise self.HTMLResponseError(
                         '[Ranbooru] Gelbooru returned an HTML page instead of JSON '
                         f'(HTTP {status}) even though an API key and user ID '
                         'were supplied. A site challenge, search restriction, '
@@ -663,29 +680,50 @@ class Gelbooru(Booru):
         if id:
             add_tags = ''
         requested_pages = max(1, int(max_pages))
-        page = random.randrange(requested_pages) if not id else 0
 
         def fetch_page(page_number):
-            # Never persist or print an authenticated URL.
+            # Credentials are supplied separately by _fetch_json.
+            # Never print URLs or response bodies (they may include secrets).
             url = f'{self.booru_url}&pid={page_number}{id}{add_tags}'
             self.last_url = url
-            return self._fetch_json(url)
+            return self._fetch_json(url, page_number=page_number)
 
-        data, COUNT = fetch_page(page)
-
+        # Direct post-ID lookup: one request only, no need for a count probe.
         if id:
+            data, COUNT = fetch_page(0)
             return data
 
-        # The selected page can be beyond the last actual page if the user
-        # requests more pages than are available. Retry a valid random page,
-        # or the first page when a sparse page returns no posts.
+        # Page 0 tells us how many pages are really available for this query.
+        # Do not select a random page until we have validated that response.
+        first_page, COUNT = fetch_page(0)
         available_pages = max(1, (COUNT + POST_AMOUNT - 1) // POST_AMOUNT)
-        if COUNT and (page >= available_pages or not data['post']):
-            valid_page = (
-                random.randrange(available_pages)
-                if page >= available_pages else 0
-            )
-            data, COUNT = fetch_page(valid_page)
+        eligible_pages = min(requested_pages, available_pages)
+        selected_page = random.randrange(eligible_pages)
+        print(
+            f'[Ranbooru] Gelbooru matching_posts={COUNT} '
+            f'available_pages={available_pages} '
+            f'max_pages={requested_pages} selected_page={selected_page}'
+        )
+
+        if selected_page == 0 or COUNT == 0:
+            data = first_page
+        else:
+            try:
+                data, _ = fetch_page(selected_page)
+                if not data['post']:
+                    print(
+                        f'[Ranbooru] Gelbooru page={selected_page} returned '
+                        'no posts; falling back to page=0.'
+                    )
+                    data = first_page
+            except self.HTMLResponseError:
+                # Reuse the already-validated page 0 as a fallback rather than
+                # making a third API request and increasing quota pressure.
+                print(
+                    f'[Ranbooru] Gelbooru page={selected_page} returned HTML; '
+                    'falling back to validated page=0 results.'
+                )
+                data = first_page
 
         if COUNT > requested_pages * POST_AMOUNT:
             print(
