@@ -555,10 +555,17 @@ class Gelbooru(Booru):
 
             status = response.status_code
             if status in (401, 403):
+                if not auth:
+                    raise RuntimeError(
+                        f'[Ranbooru] Gelbooru denied tag-search API access '
+                        f'(HTTP {status}). No API key/user ID pair was sent. '
+                        'Add BOTH values in the Gelbooru settings and enable '
+                        '"Save credentials" if you want them kept after restart.'
+                    )
                 raise RuntimeError(
-                    f'[Ranbooru] Gelbooru API denied access (HTTP {status}). '
-                    'Check your Gelbooru API key and user ID in Ranbooru settings; '
-                    'Gelbooru can require authentication even for searches.'
+                    f'[Ranbooru] Gelbooru denied API access (HTTP {status}) '
+                    'even though an API key and user ID were supplied. '
+                    'Verify the pair in your Gelbooru account options.'
                 )
             if status in self.RETRYABLE_STATUSES:
                 if attempt < 2:
@@ -581,10 +588,22 @@ class Gelbooru(Booru):
                 content_type = response.headers.get('Content-Type', '').lower()
                 prefix = (response.text or '').lstrip()[:120].lower()
                 if 'html' in content_type or prefix.startswith(('<!doctype', '<html')):
+                    if not auth:
+                        raise RuntimeError(
+                            '[Ranbooru] Gelbooru returned HTML instead of JSON '
+                            f'(HTTP {status}). No API key/user ID pair was sent. '
+                            'Gelbooru may allow post-ID lookups but require '
+                            'authentication for tag searches. Enter BOTH '
+                            'values under Gelbooru credentials; select '
+                            '"Save credentials" to retain them after restart.'
+                        ) from None
                     raise RuntimeError(
-                        '[Ranbooru] Gelbooru returned an HTML page instead of '
-                        'JSON. API access may be blocked or require a valid '
-                        'Gelbooru API key and user ID.'
+                        '[Ranbooru] Gelbooru returned HTML instead of JSON '
+                        f'(HTTP {status}) even though an API key and user ID '
+                        'were supplied. A site challenge, search restriction, '
+                        'or temporary issue may be blocking tag searches. '
+                        'Try Max pages = 1 and a simple tag, then verify '
+                        'your credentials and Gelbooru access.'
                     ) from None
                 if attempt < 2:
                     time.sleep(self.RETRY_DELAYS[attempt])
@@ -2848,6 +2867,13 @@ class Script(scripts.Script):
             )
 
             print(f'Using {booru}')
+            if booru == 'gelbooru':
+                auth_present = bool(gelbooru_api_key and gelbooru_user_id)
+                print(
+                    '[Ranbooru] Gelbooru API credentials: '
+                    + ('key and user ID supplied' if auth_present
+                       else 'MISSING/INCOMPLETE (search is anonymous)')
+                )
 
             # Manage Post ID
             if post_id:
