@@ -11,7 +11,9 @@ Ranbooru's Gelbooru adapter now checks the HTTP status and validates the JSON re
 - **HTML login/challenge pages:** reports that the API returned HTML instead of JSON, without blindly retrying.
 - **HTTP 401/403:** immediately explains how to check the Gelbooru API key and user ID.
 - **Explicit JSON failures** (e.g., `success: false`): show a meaningful error instead of being interpreted as an empty list of posts.
-- **Page selection:** if the randomly selected page exceeds the real number of pages or comes back empty, retry a valid page.
+- **Page selection:** query page 0 first for a reliable total count, then choose a random page only within both the user's **Max pages** setting and the actual available pages. An empty deeper page falls back to the already validated first page.
+- **HTML response from a deeper page:** use the successfully fetched page 0 result rather than failing generation. No redundant third request is needed; this is gentler on Gelbooru's per-account request limit.
+- **Safe diagnostics:** log the numeric page index, HTTP status, response type (JSON/HTML/other), and attempt number. No request URL, HTML body, user ID, or API key is logged. First-page HTML still raises an explicit API error because a valid result count cannot be obtained.
 
 The adapter deliberately does **not** print API responses or authenticated URLs, because the API key may be in a request query string. `last_url` is now a credential-free URL. Credentials are still sent to Gelbooru through request parameters when configured.
 
@@ -42,3 +44,9 @@ Ranbooru now logs one of two **non-secret** statuses when Gelbooru is selected:
 
 In both cases, the error message distinguishes anonymous vs authenticated failures, and neither the log nor the exception reveals the actual secret.
 
+
+## Max pages and account request quotas
+
+The Gelbooru account limit of **10 requests per 1 second** is a rate cap, **not** a 10-page search limit. With this patch, a normal tag search uses one request to page 0 and at most one additional request for a random deeper page (excluding transient-error retries). A direct post-ID lookup still uses one request.
+
+The extension does not add an artificial rate limiter without evidence of exceeding the quota. Existing rate-limit handling continues to retry HTTP 429 with bounded delays. If Gelbooru serves an HTML page on page 0, inspect the status/type diagnostic line and check account access; that cannot be resolved by selecting a different page.
