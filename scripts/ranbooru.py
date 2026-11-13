@@ -590,7 +590,7 @@ class Gelbooru(Booru):
                 if 'html' in content_type or prefix.startswith(('<!doctype', '<html')):
                     if not auth:
                         raise RuntimeError(
-                            '[Ranbooru] Gelbooru returned HTML instead of JSON '
+                            '[Ranbooru] Gelbooru returned an HTML page instead of JSON '
                             f'(HTTP {status}). No API key/user ID pair was sent. '
                             'Gelbooru may allow post-ID lookups but require '
                             'authentication for tag searches. Enter BOTH '
@@ -598,7 +598,7 @@ class Gelbooru(Booru):
                             '"Save credentials" to retain them after restart.'
                         ) from None
                     raise RuntimeError(
-                        '[Ranbooru] Gelbooru returned HTML instead of JSON '
+                        '[Ranbooru] Gelbooru returned an HTML page instead of JSON '
                         f'(HTTP {status}) even though an API key and user ID '
                         'were supplied. A site challenge, search restriction, '
                         'or temporary issue may be blocking tag searches. '
