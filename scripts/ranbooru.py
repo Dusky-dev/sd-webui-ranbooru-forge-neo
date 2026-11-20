@@ -801,18 +801,21 @@ def per_image_values(value, total):
     return [values[i % len(values)] for i in range(total)]
 
 
-def per_image_seeds(p, total):
-    """The seed of every image of the txt2img run (Forge fills all_seeds)."""
-    seeds = list(getattr(p, 'all_seeds', None) or [])
+def per_image_seeds(p, total, kind='seed'):
+    """The seed (or subseed) of every image of the txt2img run, which Forge
+    fills in all_seeds / all_subseeds. None when unknown: then each pass
+    gets a random one."""
+    seeds = list(getattr(p, f'all_{kind}s', None) or [])
     if len(seeds) >= total:
         return seeds[:total]
-    seed = p.seed[0] if isinstance(p.seed, (list, tuple)) and p.seed else p.seed
+    seed = getattr(p, kind, -1)
+    seed = seed[0] if isinstance(seed, (list, tuple)) and seed else seed
     try:
         base = int(seeds[0] if seeds else seed)
     except (TypeError, ValueError):
-        base = -1
+        return None
     if base == -1:
-        return [-1] * total
+        return None
     return [base + i for i in range(total)]
 
 
@@ -1368,12 +1371,17 @@ class Gelbooru(Booru):
             add_tags = ''
         requested_pages = max(1, int(max_pages))
 
+        # A typed sort:random gives a new draw from the same URL each time.
+        cache_pages = 'sort:random' not in unquote_plus(add_tags).lower()
+
         def fetch_page(page_number):
             # Credentials are supplied separately by _fetch_json.
             # Never print URLs or response bodies (they may include secrets).
             url = f'{self.booru_url}&pid={page_number}{id}{add_tags}'
             self.last_url = url
-            return self._fetch_json(url, page_number=page_number)
+            return self._fetch_json(
+                url, page_number=page_number, cache=cache_pages
+            )
 
         # Direct post-ID lookup: one request only, no need for a count probe.
         if id:
@@ -3494,6 +3502,7 @@ class Script(scripts.Script):
             prompts = per_image_values(p.prompt, total)
             negative_prompts = per_image_values(p.negative_prompt, total)
             seeds = per_image_seeds(p, total)
+            subseeds = per_image_seeds(p, total, 'subseed')
             init_images = per_image_values(self.last_img, total)
 
             base_settings = img2img_settings_from(
@@ -3502,7 +3511,7 @@ class Script(scripts.Script):
             images, infotexts, first_image = [], [], 0
             for batch in range(n_iter):
                 state = getattr(shared, 'state', None)
-                if batch and state is not None and (
+                if state is not None and (
                     getattr(state, 'interrupted', False)
                     or getattr(state, 'stopping_generation', False)
                 ):
@@ -3522,7 +3531,7 @@ class Script(scripts.Script):
                     ),
                     prompt=prompts[part],
                     negative_prompt=negative_prompts[part],
-                    seed=seeds[part],
+                    seed=seeds[part] if seeds else -1,
                     batch_size=batch_size,
                     n_iter=1,
                     steps=self.real_steps,
@@ -3531,6 +3540,8 @@ class Script(scripts.Script):
                     init_images=init_images[part],
                     denoising_strength=denoising,
                 )
+                if subseeds and 'subseed' in settings:
+                    settings['subseed'] = subseeds[part]
                 proc = process_images(
                     StableDiffusionProcessingImg2Img(**settings)
                 )

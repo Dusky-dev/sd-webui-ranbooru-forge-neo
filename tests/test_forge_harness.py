@@ -182,7 +182,16 @@ def png_bytes():
     return buffer.getvalue()
 
 
+def gelbooru_reply(url):
+    posts = [{'id': 9000 + i, 'tags': f'1girl solo sitting gel_{i}', 'score': 1,
+              'file_url': f'https://img.gelbooru.com/images/aa/{i}.png'} for i in range(5)]
+    return Reply(text=json.dumps({'@attributes': {'count': 3194500}, 'post': posts}),
+                 data={'@attributes': {'count': 3194500}, 'post': posts})
+
+
 def fake_get(url, **kwargs):
+    if 'gelbooru.com/index.php' in url:
+        return gelbooru_reply(url)
     if '/images/' in url:
         return Reply(content=png_bytes(), ctype='image/png')
     if 'limit=0' in url:
@@ -440,6 +449,97 @@ class ForgeHarnessTests(unittest.TestCase):
         finally:
             http.set_cache(False)
         self.assertIsNone(http.session)
+
+    # -- Use cache through the generation hooks --
+
+    def transport(self):
+        """A requests transport answering from fake_get, counting calls."""
+        import requests
+        from requests.adapters import BaseAdapter
+        from urllib3 import HTTPResponse
+        seen = []
+
+        class FakeTransport(BaseAdapter):
+            def send(self, request, **kwargs):
+                seen.append(request.url)
+                reply = fake_get(request.url)
+                body = reply.text.encode() if reply.text else reply.content
+                response = requests.Response()
+                response.status_code = reply.status_code
+                response._content = body
+                response.headers.update(reply.headers)
+                response.url = request.url
+                response.request = request
+                response.raw = HTTPResponse(body=io.BytesIO(body), status=reply.status_code,
+                                            preload_content=False, request_url=request.url)
+                return response
+
+            def close(self):
+                pass
+
+        return FakeTransport(), seen
+
+    def cached_session(self):
+        http = self.rb.booru_http
+        http.set_cache(True)
+        adapter, seen = self.transport()
+        http.session.mount('https://', adapter)
+        http.session.cache.clear()
+        return http, seen
+
+    def test_use_cache_on_serves_repeat_searches_from_cache(self):
+        http, seen = self.cached_session()
+        try:
+            self.generate(1, 1, use_cache=True)
+            first = list(seen)
+            self.generate(1, 1, use_cache=True)
+            self.assertTrue(first)
+            self.assertTrue(all('/images/' not in url for url in seen))  # downloads not cached
+            self.assertIs(http.session is not None, True)
+            # The count probe is answered from the cache the second time.
+            probes = [url for url in seen if 'limit=0' in url]
+            self.assertEqual(len(probes), 1, seen)
+        finally:
+            http.set_cache(False)
+
+    def test_gelbooru_sort_random_through_the_hooks_bypasses_the_cache(self):
+        http, seen = self.cached_session()
+        plain = []
+
+        def recording_get(url, **kwargs):
+            plain.append(url)
+            return fake_get(url, **kwargs)
+
+        try:
+            script = self.rb.Script()
+            p = self.processing(1, 1)
+            with mock.patch.object(self.rb.requests, 'get', side_effect=recording_get), \
+                    mock.patch('sys.stdout', new=io.StringIO()) as out:
+                script.before_process(p, *self.values(
+                    booru='gelbooru', use_cache=True, api_key='KEY', user_id='42'))
+            self.assertEqual(seen, [])  # nothing went through the cached session
+            searches = [url for url in plain if 'gelbooru.com/index.php' in url]
+            self.assertEqual(len(searches), 1)
+            self.assertIn('sort:random', searches[0])
+            self.assertIn('sort:random: matching_posts=3194500', out.getvalue())
+            self.assertIn('gel_', p.prompt)
+        finally:
+            http.set_cache(False)
+
+    def test_legacy_global_cache_is_removed_only_if_it_is_ranbooru(self):
+        import requests_cache
+        path = os.path.join(self.tmp, 'legacy')
+        os.makedirs(path, exist_ok=True)
+        try:
+            requests_cache.install_cache(os.path.join(path, 'ranbooru_cache'), backend='sqlite')
+            self.rb.remove_legacy_global_cache()
+            self.assertFalse(requests_cache.patcher.is_installed())
+
+            requests_cache.install_cache(os.path.join(path, 'other_extension'), backend='sqlite')
+            self.rb.remove_legacy_global_cache()
+            self.assertTrue(requests_cache.patcher.is_installed())
+        finally:
+            requests_cache.uninstall_cache()
 
 
 if __name__ == '__main__':
