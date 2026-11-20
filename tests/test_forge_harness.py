@@ -10,6 +10,7 @@ Needs gradio 4.40 (Forge Neo's pinned version). Without it the tests are
 skipped, unless RANBOORU_REQUIRE_GRADIO=1 (set in CI) turns that into a
 failure.
 """
+import copy
 import dataclasses
 import importlib.util
 import io
@@ -80,6 +81,8 @@ def build_forge_modules(extension_root, calls):
         sd_model: object = None
         outpath_samples: str = None
         outpath_grids: str = None
+        do_not_save_samples: bool = False
+        do_not_save_grid: bool = False
 
         def setup_prompts(self):
             # Forge Neo modules/processing.py setup_prompts
@@ -103,14 +106,26 @@ def build_forge_modules(extension_root, calls):
         init_images: list = None
         denoising_strength: float = 0.75
 
+    @dataclasses.dataclass
+    class StableDiffusionProcessingTxt2Img(StableDiffusionProcessing):
+        enable_hr: bool = False
+
     class Processed:
         def __init__(self, p, images, infotexts, first):
             self.images, self.infotexts = images, infotexts
             self.index_of_first_image = first
             self.all_seeds = p.all_seeds
+            self.width, self.height, self.steps = p.width, p.height, p.steps
+            self.info = f'Steps: {p.steps}, Size: {p.width}x{p.height}'
 
     def process_images(p):
-        calls.append(p)
+        try:
+            return run(p)
+        finally:
+            # The settings p ran with, even if a script changes p afterwards.
+            calls.append(copy.copy(p))
+
+    def run(p):
         p.setup_prompts()
         if isinstance(p.seed, list):
             p.all_seeds = p.seed
@@ -137,6 +152,7 @@ def build_forge_modules(extension_root, calls):
     processing.process_images = process_images
     processing.StableDiffusionProcessing = StableDiffusionProcessing
     processing.StableDiffusionProcessingImg2Img = StableDiffusionProcessingImg2Img
+    processing.StableDiffusionProcessingTxt2Img = StableDiffusionProcessingTxt2Img
 
     shared = types.ModuleType('modules.shared')
     shared.opts = types.SimpleNamespace(
@@ -175,10 +191,20 @@ class Reply:
             raise RuntimeError(self.status_code)
 
 
-def png_bytes():
+# Image URLs (by their post number) that fail to download.
+FAILING_IMAGES = set()
+
+
+def image_number(url):
+    """The post number in a fake image URL (.../images/<dir>/<n>.png)."""
+    return int(url.rsplit('/', 1)[1].split('.')[0].replace('sample_', ''))
+
+
+def png_bytes(number=0):
+    """A PNG whose width tells which post it belongs to: 64 + number."""
     from PIL import Image
     buffer = io.BytesIO()
-    Image.new('RGB', (64, 48), (200, 10, 10)).save(buffer, format='PNG')
+    Image.new('RGB', (64 + number, 48), (200, 10, 10)).save(buffer, format='PNG')
     return buffer.getvalue()
 
 
@@ -200,7 +226,9 @@ def fake_get(url, **kwargs):
             return Reply(content=b'<!DOCTYPE html><html></html>',
                          ctype='text/html; charset=UTF-8')
     if '/images/' in url:
-        return Reply(content=png_bytes(), ctype='image/png')
+        if image_number(url) in FAILING_IMAGES:
+            return Reply(status=404, ctype='text/html')
+        return Reply(content=png_bytes(image_number(url)), ctype='image/png')
     if 'limit=0' in url:
         return Reply(text='<?xml version="1.0"?><posts count="5000" offset="0"></posts>',
                      ctype='text/xml')
@@ -283,9 +311,10 @@ class ForgeHarnessTests(unittest.TestCase):
         return params[2:] if hook == 'before_process' else params[3:]
 
     def processing(self, batch=1, n_iter=1):
-        p = self.rb.StableDiffusionProcessingImg2Img.__mro__[1](
+        txt2img = sys.modules['modules.processing'].StableDiffusionProcessingTxt2Img
+        p = txt2img(
             prompt='masterpiece', negative_prompt='lowres', batch_size=batch,
-            n_iter=n_iter, seed=1000)
+            n_iter=n_iter, seed=1000, width=1024, height=768, enable_hr=True)
         p.scripts = types.SimpleNamespace(alwayson_scripts=[])
         p.script_args = ()
         return p
@@ -335,6 +364,31 @@ class ForgeHarnessTests(unittest.TestCase):
             results = restore[0].fn()
         self.assertEqual(len(results), len(restore[0].outputs))
 
+    def test_saved_yande_re_restores_to_a_listed_booru(self):
+        demo, _ = self.ui[False]
+        restore = [fn for fn in self.functions(demo)
+                   if getattr(fn.fn, '__name__', '') == 'restore_browser_page'][0]
+        names = [getattr(block, 'label', None) for block in restore.outputs]
+        with open(self.state_file, 'w', encoding='utf-8') as handle:
+            json.dump({'tabs': {'txt2img': {'booru': 'yande.re',
+                                            'mature_rating': 'Explicit'}}}, handle)
+        recent = os.path.join(os.path.dirname(self.state_file), 'booru_recent.json')
+        with open(recent, 'w', encoding='utf-8') as handle:
+            json.dump({'version': 1, 'recent': ['yande.re', 'konachan']}, handle)
+        try:
+            with mock.patch('sys.stdout', new=io.StringIO()):
+                results = restore.fn()
+            booru = results[names.index('Booru')]
+            self.assertNotIn('yande.re', booru['choices'])
+            self.assertIn(booru['value'], booru['choices'])
+            self.assertEqual(booru['choices'][0], 'konachan')
+        finally:
+            os.remove(recent)
+        # Called directly (e.g. through the API), it is an error, not a
+        # silent Gelbooru search.
+        with self.assertRaisesRegex(ValueError, "Unknown booru 'yande.re'"):
+            self.generate(1, 1, booru='yande.re')
+
     # -- generation --
 
     def test_txt2img_batches(self):
@@ -383,6 +437,104 @@ class ForgeHarnessTests(unittest.TestCase):
                 self.assertEqual(processed.index_of_first_image,
                                  1 if n_iter == 1 and batch > 1 else 0)
                 self.assertTrue(all(not isinstance(i, str) for i in processed.images[generated:]))
+
+    def test_throwaway_pass_is_cheap_and_settings_come_back(self):
+        for crop in (False, True):
+            with self.subTest(crop_center=crop):
+                p, processed = self.generate(2, 1, use_img2img=True, crop_center=crop)
+                txt2img = [c for c in self.calls if not hasattr(c, 'init_images')]
+                img2img = [c for c in self.calls if hasattr(c, 'init_images')]
+                dummy = txt2img[0]
+                self.assertEqual((dummy.steps, dummy.width, dummy.height), (1, 256, 256))
+                self.assertTrue(dummy.do_not_save_samples and dummy.do_not_save_grid)
+                self.assertFalse(dummy.enable_hr)
+                # The real pass: real steps; Crop center keeps the real size,
+                # otherwise the size follows the (landscape) image.
+                size = (1024, 768) if crop else (768, 512)
+                self.assertEqual([(c.steps, c.width, c.height) for c in img2img],
+                                 [(20,) + size])
+                self.assertFalse(img2img[0].do_not_save_samples)
+                self.assertEqual((processed.width, processed.height, processed.steps),
+                                 size + (20,))
+                self.assertEqual(processed.info, f'Steps: 20, Size: {size[0]}x{size[1]}')
+                # p is back to what the user set.
+                self.assertEqual((p.steps, p.width, p.height, p.enable_hr,
+                                  p.do_not_save_samples, p.do_not_save_grid),
+                                 (20, 1024, 768, True, False, False))
+
+    def assert_images_match_prompts(self):
+        img2img = [c for c in self.calls if hasattr(c, 'init_images')]
+        self.assertTrue(img2img)
+        for call in img2img:
+            for prompt, image in zip(call.all_prompts, call.init_images):
+                number = image.size[0] - 64
+                self.assertIn(f'post_{number},', prompt + ',')
+        return img2img
+
+    def test_each_image_keeps_its_own_prompt(self):
+        for batch, n_iter in ((2, 1), (2, 2), (1, 3)):
+            with self.subTest(batch=batch, n_iter=n_iter):
+                self.generate(batch, n_iter, use_img2img=True)
+                self.assert_images_match_prompts()
+
+    def test_failed_download_swaps_in_another_post(self):
+        FAILING_IMAGES.update({0, 1, 2})
+        try:
+            for _ in range(5):
+                self.generate(2, 2, use_img2img=True)
+                for call in self.assert_images_match_prompts():
+                    for prompt in call.all_prompts:
+                        for bad in FAILING_IMAGES:
+                            self.assertNotIn(f'post_{bad},', prompt + ',')
+            # Every image fails: a readable error.
+            FAILING_IMAGES.update(range(6))
+            with self.assertRaisesRegex(RuntimeError, 'none of the 2 booru image'):
+                self.generate(2, 1, use_img2img=True)
+        finally:
+            FAILING_IMAGES.clear()
+
+    def test_same_prompt_downloads_one_image(self):
+        fetched = []
+
+        def recording_get(url, **kwargs):
+            if '/images/' in url:
+                fetched.append(url)
+            return fake_get(url, **kwargs)
+
+        script = self.rb.Script()
+        p = self.processing(2, 2)
+        with mock.patch.object(self.rb.requests, 'get', side_effect=recording_get), \
+                mock.patch('sys.stdout', new=io.StringIO()):
+            script.before_process(p, *self.values(use_img2img=True, same_prompt=True))
+        self.assertEqual(len(fetched), 1)
+
+    def test_failed_search_never_reuses_the_last_runs_images(self):
+        script = self.rb.Script()
+
+        def run(**overrides):
+            # Like Forge: an error in before_process is reported, then
+            # generation carries on and postprocess is called.
+            self.calls.clear()
+            p = self.processing(1, 1)
+            with mock.patch.object(self.rb.requests, 'get', side_effect=fake_get), \
+                    mock.patch('sys.stdout', new=io.StringIO()):
+                try:
+                    script.before_process(p, *self.values(**overrides))
+                except Exception:
+                    pass
+                processed = self.rb.process_images(p)
+                script.postprocess(p, processed, *self.values(**overrides))
+            return p
+
+        run(use_img2img=True)
+        self.assertEqual(len([c for c in self.calls if hasattr(c, 'init_images')]), 1)
+        FAILING_IMAGES.update(range(6))
+        try:
+            p = run(use_img2img=True)
+        finally:
+            FAILING_IMAGES.clear()
+        self.assertEqual([c for c in self.calls if hasattr(c, 'init_images')], [])
+        self.assertEqual(p.steps, 20)  # the full txt2img run, untouched
 
     def test_interrupt_stops_between_passes(self):
         state = self.rb.shared.state
@@ -538,7 +690,9 @@ class ForgeHarnessTests(unittest.TestCase):
                                      api_key='KEY', user_id='42')
         sources = [c for c in self.calls if getattr(c, 'init_images', None)]
         self.assertEqual(len(sources), 1)
-        self.assertEqual(sources[0].init_images[0].size, (64, 48))
+        width, height = sources[0].init_images[0].size
+        self.assertEqual(height, 48)
+        self.assertIn(f'gel_{width - 64}', sources[0].all_prompts[0])
 
     def test_legacy_global_cache_is_removed_only_if_it_is_ranbooru(self):
         import requests_cache

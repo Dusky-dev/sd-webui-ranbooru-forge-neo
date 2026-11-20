@@ -222,7 +222,7 @@ BOORU_RECENT_FILE = os.path.join(user_data_dir, 'booru_recent.json')
 BOORU_RECENT_LOCK = threading.RLock()
 BOORU_DEFAULT_ORDER = (
     'safebooru', 'rule34', 'danbooru', 'gelbooru', 'konachan',
-    'yande.re', 'aibooru', 'xbooru', 'e621'
+    'aibooru', 'xbooru', 'e621'
 )
 
 
@@ -761,7 +761,6 @@ RATINGS = {
     "e621": RATING_TYPES['full'],
     "danbooru": RATING_TYPES['single'],
     "aibooru": RATING_TYPES['full'],
-    "yande.re": RATING_TYPES['full'],
     "konachan": RATING_TYPES['full'],
     "safebooru": RATING_TYPES['none'],
     "rule34": RATING_TYPES['full'],
@@ -790,6 +789,158 @@ def img2img_settings_from(p, img2img_class):
         for name in IMG2IMG_COPIED_SETTINGS
         if hasattr(p, name) and (accepted is None or name in accepted)
     }
+
+
+# The throwaway txt2img pass before Use img2img: its size and the settings
+# Ranbooru changes for it (restored in postprocess).
+DUMMY_PASS_SIZE = 256
+DUMMY_PASS_SETTINGS = (
+    'steps', 'width', 'height', 'do_not_save_samples', 'do_not_save_grid',
+    'enable_hr',
+)
+
+
+def orientation_size(width, height):
+    """img2img output size without Crop center: 768 x 512, 512 x 768 or
+    768 x 768, by the image's shape."""
+    if width / height > 1.2:
+        return [768, 512]
+    if height / width > 1.2:
+        return [512, 768]
+    return [768, 768]
+
+
+def image_versions(post):
+    """(url, width, height) of the smaller copies a booru offers for a post,
+    from the fields each API returns. Copies without a known size are left
+    out: they can't be checked against the output size."""
+    original = post.get('file_url')
+    versions = []
+
+    def add(url, width, height):
+        try:
+            width, height = int(width), int(height)
+        except (TypeError, ValueError):
+            return
+        if (isinstance(url, str) and url.startswith('http')
+                and url != original and width > 0 and height > 0):
+            versions.append((url, width, height))
+
+    # Gelbooru and its 0.2 family, Moebooru (Safebooru reports width 0 and
+    # the original's URL when it has no sample).
+    add(post.get('sample_url'), post.get('sample_width'), post.get('sample_height'))
+    add(post.get('jpeg_url'), post.get('jpeg_width'), post.get('jpeg_height'))
+    # Danbooru and AIBooru.
+    media = post.get('media_asset')
+    variants = media.get('variants') if isinstance(media, dict) else None
+    for variant in variants if isinstance(variants, list) else ():
+        if isinstance(variant, dict) and variant.get('type') == 'sample':
+            add(variant.get('url'), variant.get('width'), variant.get('height'))
+    # e621 (current, then the older API).
+    files = post.get('files')
+    for sample in (files.get('sample') if isinstance(files, dict) else None,
+                   post.get('sample')):
+        if isinstance(sample, dict):
+            add(sample.get('jpg') or sample.get('url'),
+                sample.get('width'), sample.get('height'))
+    return versions
+
+
+def image_download_urls(post, crop_size=None):
+    """URLs to try for a post's img2img image: the smallest copy that still
+    covers the output size, then the original. crop_size is the output size
+    with Crop center; without it the output size follows the image's shape."""
+    urls = []
+    for url, width, height in sorted(image_versions(post), key=lambda v: v[1] * v[2]):
+        need_w, need_h = crop_size or orientation_size(width, height)
+        if width >= need_w and height >= need_h and url not in urls:
+            urls.append(url)
+    original = post.get('file_url')
+    if isinstance(original, str) and original.startswith('http') and original not in urls:
+        urls.append(original)
+    return urls
+
+
+def download_image(urls, headers, downloaded):
+    """The first of urls that downloads as an image. downloaded maps each URL
+    already tried to its image (or None), so a URL is fetched only once."""
+    errors = []
+    for url in urls:
+        if url not in downloaded:
+            try:
+                response = requests.get(url, headers=headers, timeout=20)
+                response.raise_for_status()
+                content_type = response.headers.get('Content-Type', '')
+                if content_type.startswith('text/'):
+                    raise ValueError(
+                        f'the server sent a web page ({content_type}) '
+                        f'instead of the image'
+                    )
+                downloaded[url] = Image.open(BytesIO(response.content)).convert('RGB')
+            except Exception as exc:
+                print(f'Failed to load image {url}: {exc}')
+                downloaded[url] = None
+        if downloaded[url] is not None:
+            return downloaded[url]
+        errors.append(url)
+    raise RuntimeError(f'no image could be downloaded ({", ".join(errors) or "no URL"})')
+
+
+def images_for_posts(posts, needed, pool, load, fixed=False, max_swaps=10,
+                     max_failures_first=3):
+    """Load the image of posts[i] for each i in needed; returns {i: image}.
+
+    A post whose image can't be loaded is replaced in posts (everywhere it
+    appears, so Same prompt stays the same) by an unused post from pool, so
+    its prompt follows the image. With no spare post left, a post that did
+    load is reused, prompt and image together. fixed (a post ID): nothing
+    can replace the post, so fail with its ID. If the first
+    max_failures_first tries all fail, the image host is likely down: stop
+    rather than wait on every spare post.
+    """
+    images = {}
+    spare = [post for post in pool if all(post is not chosen for chosen in posts)]
+    swaps = max_swaps
+    failures = 0
+    for index in needed:
+        while index not in images:
+            post = posts[index]
+            try:
+                images[index] = load(post)
+            except Exception as exc:
+                failures += 1
+                if fixed:
+                    raise RuntimeError(
+                        f'[Ranbooru] Use img2img: the image of post '
+                        f'{post.get("id")} could not be downloaded ({exc}).'
+                    ) from exc
+                if not spare or swaps <= 0 or (
+                        not images and failures >= max_failures_first):
+                    break
+                swaps -= 1
+                replacement = spare.pop(0)
+                print(f'[Ranbooru] Use img2img: using post {replacement.get("id")} '
+                      f'instead of post {post.get("id")}, whose image failed.')
+                for position, chosen in enumerate(posts):
+                    if chosen is post:
+                        posts[position] = replacement
+        if not images and failures >= max_failures_first:
+            break
+
+    loaded = [index for index in needed if index in images]
+    if not loaded:
+        raise RuntimeError(
+            f'[Ranbooru] Use img2img: none of the {len(needed)} '
+            f'booru image(s) could be downloaded (see the console '
+            f'for each error). Try again or turn off Use img2img.'
+        )
+    for index in needed:
+        if index not in images:
+            source = random.choice(loaded)
+            print(f'[Ranbooru] Use img2img: no spare posts left; reusing post '
+                  f'{posts[source].get("id")}.')
+            posts[index], images[index] = posts[source], images[source]
+    return images
 
 
 def per_image_values(value, total):
@@ -1059,7 +1210,7 @@ XML_REASON_PATTERN = re.compile(
 )
 
 
-def fetch_booru_json(url, site, headers=None, auth=None, secrets=()):
+def fetch_booru_json(url, site, headers=None, auth=None, secrets=(), cache=True):
     """GET a booru JSON endpoint and return the decoded body.
 
     Every failure becomes a RuntimeError that names the site and the reason,
@@ -1067,7 +1218,7 @@ def fetch_booru_json(url, site, headers=None, auth=None, secrets=()):
     """
     try:
         response = booru_http.get(
-            url, headers=headers, auth=auth, timeout=20
+            url, headers=headers, auth=auth, timeout=20, cache=cache
         )
     except requests.exceptions.RequestException as exc:
         raise RuntimeError(
@@ -1147,6 +1298,56 @@ def pages_for_count(count, max_pages, page_limit=None):
     if page_limit:
         pages = min(pages, page_limit)
     return pages
+
+
+def has_own_order(add_tags):
+    """True when the search names its own order (sort:, order:, random:).
+    Such searches keep walking pages; others ask the booru for random posts."""
+    terms = unquote_plus(add_tags or '').lower()
+    return any(key in terms for key in ('sort:', 'order:', 'random:'))
+
+
+def with_search_term(add_tags, term):
+    """Append one search term to a '&tags=...' query fragment."""
+    add_tags = add_tags or ''
+    if '&tags=' not in add_tags:
+        return f'{add_tags}&tags={term}'
+    if add_tags.endswith('&tags='):
+        return f'{add_tags}{term}'
+    return f'{add_tags}+{term}'
+
+
+def random_or_paged(site, term, fetch_random, fetch_paged, page_when_empty=True):
+    """Posts drawn at random from the whole search, else a random page.
+
+    fetch_random() asks the booru to order the search randomly (one request,
+    never cached: the URL is the same every time). If the booru refuses that
+    or returns nothing, fall back to the old random-page walk.
+    page_when_empty=False: an empty draw means the search matches nothing
+    (for boorus that report no count to check that first).
+    """
+    try:
+        posts = fetch_random()
+    except RuntimeError as exc:
+        # Unreachable, rate limited or missing/rejected credentials: a
+        # second request would fail the same way.
+        if any(reason in str(exc) for reason in (
+                'Unable to contact', 'Rate limit', 'requires an API key',
+                'rejected the request')):
+            raise
+        print(f'[Ranbooru] {site} {term} was refused ({exc}); '
+              'picking a random page instead.')
+        return fetch_paged()
+    if posts:
+        sample = ', '.join(str(post.get('id')) for post in posts[:5])
+        print(f'[Ranbooru] {site} {term}: {len(posts)} posts (ids {sample}...)')
+        return posts
+    if not page_when_empty:
+        print(f'[Ranbooru] {site} {term} returned no posts.')
+        return posts
+    print(f'[Ranbooru] {site} {term} returned no posts; '
+          'picking a random page instead.')
+    return fetch_paged()
 
 
 def parse_post_id(site, post_id):
@@ -1399,11 +1600,8 @@ class Gelbooru(Booru):
         # Random posts: one request, page 0 with sort:random, which Gelbooru
         # draws from the whole search. Searches with their own sort: order
         # walk pages instead (capped at Gelbooru's paging limit).
-        if 'sort:' not in unquote_plus(add_tags).lower():
-            random_tags = (
-                f'{add_tags}+sort:random' if '&tags=' in add_tags
-                else f'{add_tags}&tags=sort:random'
-            )
+        if not has_own_order(add_tags):
+            random_tags = with_search_term(add_tags, 'sort:random')
             try:
                 # Same URL every time: never answer it from the cache.
                 url = f'{self.booru_url}&pid=0{random_tags}'
@@ -1490,11 +1688,12 @@ class GelbooruBeta(Booru):
     def _secrets(self):
         return ()
 
-    def _get(self, url):
+    def _get(self, url, cache=True):
         self.last_url = redact_secrets(url, self._secrets())
         print(f'{self.booru} URL: {self.last_url}')
         return fetch_booru_json(
-            url, self.booru, self.headers, secrets=self._secrets()
+            url, self.booru, self.headers, secrets=self._secrets(),
+            cache=cache
         )
 
     def _normalize(self, data):
@@ -1537,13 +1736,30 @@ class GelbooruBeta(Booru):
             COUNT = 0
             return {'post': []}
 
-        pages = pages_for_count(count, max_pages, self.MAX_PID + 1)
-        pid = random.randint(0, pages - 1)
-        posts = self._normalize(
-            self._get(f'{self.booru_url}&pid={pid}{add_tags}{auth}')
-        )
+        def random_posts():
+            # Page 0 with sort:random draws from the whole search.
+            tags = with_search_term(add_tags, 'sort:random')
+            return self._normalize(
+                self._get(f'{self.booru_url}&pid=0{tags}{auth}', cache=False)
+            )
+
+        def paged_posts():
+            pages = pages_for_count(count, max_pages, self.MAX_PID + 1)
+            pid = random.randint(0, pages - 1)
+            posts = self._normalize(
+                self._get(f'{self.booru_url}&pid={pid}{add_tags}{auth}')
+            )
+            print(f' Processing page {pid + 1} of {pages}.')
+            return posts
+
+        if has_own_order(add_tags):
+            posts = paged_posts()
+        else:
+            posts = random_or_paged(
+                self.booru, 'sort:random', random_posts, paged_posts
+            )
         COUNT = count if count is not None else len(posts)
-        print(f' Processing page {pid + 1} of {pages} ({COUNT} results).')
+        print(f' {COUNT} results.')
         return {'post': posts}
 
     def get_post(self, add_tags, max_pages=10, id=''):
@@ -1606,16 +1822,16 @@ class Rule34(GelbooruBeta):
 
 
 class Moebooru(Booru):
-    """Moebooru sites (Konachan, Yande.re). Pages are 1-based."""
+    """Moebooru sites (Konachan). Pages are 1-based."""
 
     def __init__(self, booru, base_url):
         super().__init__(booru, f'{base_url}/post.json?limit={POST_AMOUNT}')
         self.base_url = base_url
 
-    def _get(self, url):
+    def _get(self, url, cache=True):
         self.last_url = url
         print(f'{self.booru} URL: {url}')
-        data = fetch_booru_json(url, self.booru, self.headers)
+        data = fetch_booru_json(url, self.booru, self.headers, cache=cache)
         if not isinstance(data, list):
             raise RuntimeError(
                 f'[Ranbooru] {self.booru} returned an unexpected '
@@ -1640,11 +1856,25 @@ class Moebooru(Booru):
             COUNT = 0
             return {'post': []}
 
-        pages = pages_for_count(count, max_pages)
-        page = random.randint(1, pages)
-        posts = self._get(f'{self.booru_url}&page={page}{add_tags}')
+        def random_posts():
+            tags = with_search_term(add_tags, 'order:random')
+            return self._get(f'{self.booru_url}&page=1{tags}', cache=False)
+
+        def paged_posts():
+            pages = pages_for_count(count, max_pages)
+            page = random.randint(1, pages)
+            posts = self._get(f'{self.booru_url}&page={page}{add_tags}')
+            print(f' Processing page {page} of {pages}.')
+            return posts
+
+        if has_own_order(add_tags):
+            posts = paged_posts()
+        else:
+            posts = random_or_paged(
+                self.booru, 'order:random', random_posts, paged_posts
+            )
         COUNT = count if count is not None else len(posts)
-        print(f' Processing page {page} of {pages} ({COUNT} results).')
+        print(f' {COUNT} results.')
         return {'post': posts}
 
     def get_post(self, add_tags, max_pages=10, id=''):
@@ -1663,11 +1893,6 @@ class Moebooru(Booru):
 class Konachan(Moebooru):
     def __init__(self):
         super().__init__('konachan', 'https://konachan.com')
-
-
-class Yandere(Moebooru):
-    def __init__(self):
-        super().__init__('yande.re', 'https://yande.re')
 
 
 class AIBooru(Booru):
@@ -1702,27 +1927,44 @@ class AIBooru(Booru):
             COUNT = 0
             return {'post': []}
 
-        pages = pages_for_count(count, max_pages, self.MAX_PAGE)
-        page = random.randint(1, pages)
-        url = f'{self.booru_url}&page={page}{add_tags}'
-        self.last_url = url
-        print(f'AIBooru URL: {url}')
-        data = fetch_booru_json(url, 'AIBooru', self.headers)
-        if not isinstance(data, list):
-            raise RuntimeError(
-                f'[Ranbooru] AIBooru returned an unexpected '
-                f'{type(data).__name__} instead of a post list.'
+        def fetch(url, cache=True):
+            self.last_url = url
+            print(f'AIBooru URL: {url}')
+            data = fetch_booru_json(url, 'AIBooru', self.headers, cache=cache)
+            if not isinstance(data, list):
+                raise RuntimeError(
+                    f'[Ranbooru] AIBooru returned an unexpected '
+                    f'{type(data).__name__} instead of a post list.'
+                )
+            posts = []
+            for post in data:
+                # Danbooru-based sites omit file_url on posts hidden from guests.
+                if not isinstance(post, dict) or not post.get('file_url'):
+                    continue
+                post['tags'] = post.get('tag_string') or ''
+                post['score'] = post.get('score') or 0
+                posts.append(post)
+            return posts
+
+        def random_posts():
+            tags = with_search_term(add_tags, 'order:random')
+            return fetch(f'{self.booru_url}&page=1{tags}', cache=False)
+
+        def paged_posts():
+            pages = pages_for_count(count, max_pages, self.MAX_PAGE)
+            page = random.randint(1, pages)
+            posts = fetch(f'{self.booru_url}&page={page}{add_tags}')
+            print(f' Processing page {page} of {pages}.')
+            return posts
+
+        if has_own_order(add_tags):
+            posts = paged_posts()
+        else:
+            posts = random_or_paged(
+                'AIBooru', 'order:random', random_posts, paged_posts
             )
-        posts = []
-        for post in data:
-            # Danbooru-based sites omit file_url on posts hidden from guests.
-            if not isinstance(post, dict) or not post.get('file_url'):
-                continue
-            post['tags'] = post.get('tag_string') or ''
-            post['score'] = post.get('score') or 0
-            posts.append(post)
         COUNT = count if count is not None else len(posts)
-        print(f' Processing page {page} of {pages} ({COUNT} results).')
+        print(f' {COUNT} results.')
         return {'post': posts}
 
     def get_post(self, add_tags, max_pages=10, id=''):
@@ -1842,6 +2084,32 @@ class Danbooru(Booru):
         if id:
             add_tags = ''
 
+        # random:N draws from the whole search, but it uses one of the two
+        # tag slots anonymous searches get (rating: does not; tested November
+        # 2026). order:random timed out on broad searches, so it isn't used.
+        if not id and not has_own_order(add_tags) and self.random_slot_free(add_tags):
+            term = f'random:{POST_AMOUNT}'
+
+            def random_posts():
+                url = f'{self.booru_url}&page=1{with_search_term(add_tags, term)}'
+                self.last_url = url
+                try:
+                    response = booru_http.get(
+                        url, headers=self.headers, timeout=20, cache=False
+                    )
+                except requests.RequestException as exc:
+                    raise RuntimeError(
+                        f'[Ranbooru] Unable to contact Danbooru: {exc}'
+                    ) from exc
+                return self._normalize_posts(self._read_api_json(response, list))
+
+            # None: the draw was refused, so walk pages below.
+            posts = random_or_paged('Danbooru', term, random_posts, lambda: None,
+                                    page_when_empty=False)
+            if posts is not None:
+                COUNT = len(posts)
+                return {'post': posts}
+
         # Danbooru pages are ONE-based. Page 0 is not a valid random page.
         last_page = max(1, int(max_pages))
         chosen_page = random.randint(1, last_page)
@@ -1871,6 +2139,17 @@ class Danbooru(Booru):
 
         COUNT = 0
         return {'post': []}
+
+    @staticmethod
+    def random_slot_free(add_tags):
+        """True when the search leaves a tag slot for random:N. Anonymous
+        searches get two; rating: terms don't count."""
+        query = (add_tags or '').split('&tags=', 1)[-1]
+        counted = [
+            term for term in unquote_plus(query).split()
+            if not term.lower().lstrip('-').startswith('rating:')
+        ]
+        return len(counted) <= 1
 
     def get_post(self, add_tags, max_pages=10, id=''):
         url = f'https://danbooru.donmai.us/posts/{id}.json'
@@ -2014,10 +2293,13 @@ class e621(Booru):
         post['file_url'] = file_url
         return post
 
-    def _request(self, url):
+    def _request(self, url, cache=True):
         self.last_url = url
         try:
-            response = booru_http.get(url, headers=self.headers, auth=self.auth, timeout=20)
+            response = booru_http.get(
+                url, headers=self.headers, auth=self.auth, timeout=20,
+                cache=cache
+            )
         except requests.RequestException as exc:
             raise RuntimeError(f'[Ranbooru] Unable to contact e621: {exc}') from exc
         return self._read_api_json(response)
@@ -2028,14 +2310,30 @@ class e621(Booru):
         if id:
             add_tags = ''
 
-        # One request to a random ONE-based page; before_process retries
-        # page 1 itself when a random page comes back empty.
-        last_page = max(1, min(int(max_pages), self.MAX_PAGE))
-        page = random.randint(1, last_page)
-        raw_posts = self._request(f'{self.booru_url}&page={page}{id}{add_tags}')
-        posts = [p for p in map(self._normalize_post, raw_posts) if p is not None]
+        def usable(raw_posts):
+            return [p for p in map(self._normalize_post, raw_posts) if p is not None]
+
+        def random_posts():
+            tags = with_search_term(add_tags, 'order:random')
+            return usable(self._request(
+                f'{self.booru_url}&page=1{id}{tags}', cache=False
+            ))
+
+        def paged_posts():
+            # One request to a random ONE-based page; before_process retries
+            # page 1 itself when a random page comes back empty.
+            last_page = max(1, min(int(max_pages), self.MAX_PAGE))
+            page = random.randint(1, last_page)
+            posts = usable(self._request(f'{self.booru_url}&page={page}{id}{add_tags}'))
+            print(f'[Ranbooru] e621: {len(posts)} usable posts on page {page}.')
+            return posts
+
+        if id or has_own_order(add_tags):
+            posts = paged_posts()
+        else:
+            posts = random_or_paged('e621', 'order:random', random_posts, paged_posts,
+                                    page_when_empty=False)
         COUNT = len(posts)
-        print(f'[Ranbooru] e621: {COUNT} usable posts on page {page}.')
         return {'post': posts}
 
     def get_post(self, add_tags, max_pages=10, id=''):
@@ -2214,6 +2512,8 @@ class Script(scripts.Script):
 
     last_img = []
     real_steps = 0
+    real_size = None
+    real_settings = None
     version = "1.2"
     original_prompt = ''
 
@@ -2357,6 +2657,7 @@ class Script(scripts.Script):
 
             max_pages = gr.Slider(
                 label="Max Pages",
+                info="Posts are normally drawn at random from the whole search; pages are used only when the tags set their own order (sort:/order:) or a random draw isn't possible",
                 minimum=1,
                 maximum=100,
                 value=saved_slider('max_pages', 100, 1, 100),
@@ -2767,17 +3068,7 @@ class Script(scripts.Script):
 
     def check_orientation(self, img):
         """Check if image is portrait, landscape or square"""
-
-        x, y = img.size
-
-        if x / y > 1.2:
-            return [768, 512]
-
-        elif y / x > 1.2:
-            return [512, 768]
-
-        else:
-            return [768, 768]
+        return orientation_size(*img.size)
 
     @clear_ranbooru_progress_on_error
     def before_process(
@@ -2817,6 +3108,13 @@ class Script(scripts.Script):
         clear_credentials_btn
     ):
 
+        # Forge reports an error raised here and carries on with generation,
+        # then calls postprocess. Clear the last run's images and settings
+        # first, so a failed search never reuses them.
+        self.last_img = None
+        self.real_settings = None
+        self.real_size = None
+
         # Snapshot the actual submitted values, not partially edited browser state.
         # Saving before API queries also preserves inputs when the query fails.
         if enabled:
@@ -2855,7 +3153,6 @@ class Script(scripts.Script):
                 'safebooru': Safebooru(),
                 'danbooru': Danbooru(),
                 'konachan': Konachan(),
-                'yande.re': Yandere(),
                 'aibooru': AIBooru(),
                 'xbooru': XBooru(),
                 'e621': e621(
@@ -3030,16 +3327,17 @@ class Script(scripts.Script):
                     add_tags += f'+rating:{RATINGS[booru][mature_rating]}'
 
             # Getting Data
-            random_post = {'preview_url': ''}
-
             prompts = []
             last_img = []
-            preview_urls = []
 
-            api_url = booru_apis.get(
-                booru,
-                Gelbooru(fringe_benefits)
-            )
+            api_url = booru_apis.get(booru)
+            if api_url is None:
+                # e.g. yande.re, removed in November 2026: its tag searches
+                # returned no posts. Don't silently search another booru.
+                raise ValueError(
+                    f'[Ranbooru] Unknown booru {booru!r}. Choose one of: '
+                    f'{", ".join(BOORU_DEFAULT_ORDER)}.'
+                )
 
             print(f'Using {booru}')
             if booru in CREDENTIAL_BOORUS:
@@ -3078,6 +3376,7 @@ class Script(scripts.Script):
 
             # Clean malformed posts and replace null scores.
             clean_posts = []
+            skipped_without_image = 0
             raw_posts = data.get('post', [])
             if not isinstance(raw_posts, list):
                 raw_posts = []
@@ -3096,9 +3395,18 @@ class Script(scripts.Script):
                 if 'tags' not in post:
                     post['tags'] = ''
 
+                # Use img2img needs the post's own image; never substitute
+                # an unrelated picture.
+                if use_img2img and not str(post.get('file_url') or '').startswith('http'):
+                    skipped_without_image += 1
+                    continue
+
                 clean_posts.append(post)
 
             data['post'] = clean_posts
+            if skipped_without_image:
+                print(f'[Ranbooru] Use img2img: skipped {skipped_without_image} '
+                      'post(s) with no image URL.')
 
             # Artist/character/copyright tags reported by the booru, gathered
             # from the whole page so mixed prompts are covered too.
@@ -3114,6 +3422,13 @@ class Script(scripts.Script):
             )
 
             if not clean_posts:
+                if skipped_without_image:
+                    raise ValueError(
+                        '[Ranbooru] Use img2img: none of the returned posts '
+                        'has an image URL (some boorus hide images from '
+                        'anonymous users). Log in, change the tags, or turn '
+                        'off Use img2img.'
+                    )
                 raise ValueError(
                     '[Ranbooru] No posts were returned by the booru API for '
                     'these tags and rating. Check the tags, rating, post ID, '
@@ -3165,17 +3480,41 @@ class Script(scripts.Script):
                     len(data['post'])
                 )
 
-            for random_number in random_numbers:
+            selected_posts = [
+                data['post'][random_numbers[0] if same_prompt else number]
+                for number in random_numbers
+            ]
 
-                if same_prompt:
-
-                    random_post = data['post'][
-                        random_numbers[0]
-                    ]
-
+            # Get Images. Done before the prompts are built: a post whose
+            # image can't be downloaded is swapped for another post, so each
+            # image keeps the prompt of its own post.
+            if use_img2img:
+                if use_last_img:
+                    needed = [len(selected_posts) - 1]
+                elif use_ip:
+                    needed = [0]  # ControlNet takes the first image
                 else:
+                    needed = list(range(len(selected_posts)))
 
-                    random_post = data['post'][random_number]
+                image_headers = dict(api_url.headers)
+                if api_url.image_referer:
+                    image_headers['Referer'] = api_url.image_referer
+                crop_size = (p.width, p.height) if crop_center else None
+                downloaded = {}
+
+                def load_post_image(post):
+                    return download_image(
+                        image_download_urls(post, crop_size),
+                        image_headers, downloaded
+                    )
+
+                images = images_for_posts(
+                    selected_posts, needed, data['post'], load_post_image,
+                    fixed=bool(post_id)
+                )
+                last_img = [images[index] for index in needed]
+
+            for random_post in selected_posts:
 
                 clean_tags = (
                     random_post['tags']
@@ -3200,66 +3539,9 @@ class Script(scripts.Script):
 
                 prompts.append(', '.join(tag.strip() for tag in temp_tags if tag.strip()))
 
-                preview_urls.append(
-                    random_post.get(
-                        'file_url',
-                        'https://pic.re/image'
-                    )
-                )
-
                 # Debug picture
                 if DEBUG:
                     print(random_post)
-
-            # Get Images
-            if use_img2img:
-
-                image_urls = (
-                    [random_post['file_url']]
-                    if use_last_img
-                    else preview_urls
-                )
-
-                image_headers = dict(api_url.headers)
-                if api_url.image_referer:
-                    image_headers['Referer'] = api_url.image_referer
-
-                for img in image_urls:
-
-                    try:
-                        response = requests.get(
-                            img,
-                            headers=image_headers,
-                            timeout=20
-                        )
-
-                        response.raise_for_status()
-
-                        content_type = response.headers.get('Content-Type', '')
-                        if content_type.startswith('text/'):
-                            raise ValueError(
-                                f'the server sent a web page ({content_type}) '
-                                f'instead of the image'
-                            )
-
-                        image = Image.open(
-                            BytesIO(response.content)
-                        ).convert("RGB")
-
-                        last_img.append(image)
-
-                    except Exception as e:
-                        print(
-                            f"Failed to load image "
-                            f"{img}: {e}"
-                        )
-
-                if not last_img:
-                    raise RuntimeError(
-                        f'[Ranbooru] Use img2img: none of the {len(image_urls)} '
-                        f'booru image(s) could be downloaded (see the console '
-                        f'for each error). Try again or turn off Use img2img.'
-                    )
 
             # e621 posts carry no categories; look up the prompt's tags.
             e621_dropped_tags = set()
@@ -3431,9 +3713,22 @@ class Script(scripts.Script):
             if use_img2img:
 
                 if not use_ip:
-
+                    # Forge still runs the txt2img job before postprocess
+                    # starts the real img2img passes. Make that throwaway
+                    # pass cheap and invisible: 1 step, small, no Hires fix,
+                    # nothing saved. postprocess puts the real values back.
+                    self.real_settings = {
+                        name: getattr(p, name)
+                        for name in DUMMY_PASS_SETTINGS if hasattr(p, name)
+                    }
                     self.real_steps = p.steps
+                    self.real_size = (p.width, p.height)
                     p.steps = 1
+                    p.width = p.height = DUMMY_PASS_SIZE
+                    p.do_not_save_samples = True
+                    p.do_not_save_grid = True
+                    if hasattr(p, 'enable_hr'):
+                        p.enable_hr = False
 
                 self.last_img = last_img
 
@@ -3483,14 +3778,20 @@ class Script(scripts.Script):
             use_img2img
             and not use_ip
             and enabled
+            and self.last_img  # None when before_process failed
         ):
 
             print('Using pictures')
+            # Undo the throwaway pass's settings, for other scripts and for
+            # what Forge reports.
+            for name, value in (self.real_settings or {}).items():
+                setattr(p, name, value)
+            real_width, real_height = self.real_size or (p.width, p.height)
             if crop_center:
 
                 width, height = (
-                    p.width,
-                    p.height
+                    real_width,
+                    real_height
                 )
 
                 self.last_img = [
@@ -3527,7 +3828,7 @@ class Script(scripts.Script):
             base_settings = img2img_settings_from(
                 p, StableDiffusionProcessingImg2Img
             )
-            images, infotexts, first_image = [], [], 0
+            images, infotexts, first_image, info = [], [], 0, None
             for batch in range(n_iter):
                 state = getattr(shared, 'state', None)
                 if state is not None and (
@@ -3564,6 +3865,8 @@ class Script(scripts.Script):
                 proc = process_images(
                     StableDiffusionProcessingImg2Img(**settings)
                 )
+                if info is None:
+                    info = getattr(proc, 'info', None)
 
                 if n_iter == 1:
                     # One run: keep Forge's own grid, if it made one.
@@ -3579,6 +3882,11 @@ class Script(scripts.Script):
             processed.images = images
             processed.infotexts = infotexts
             processed.index_of_first_image = first_image
+            processed.width, processed.height = width, height
+            processed.steps = self.real_steps
+            if info is not None:
+                # Shown under the gallery; it described the throwaway pass.
+                processed.info = info
 
             # Show the source booru image(s) after the results, each with the
             # infotext of the image it produced.

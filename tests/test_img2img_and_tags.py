@@ -190,6 +190,138 @@ class ControlNetTests(unittest.TestCase):
             self.send(p, Image('px'), 1.0)
 
 
+def load_image_helpers(namespace):
+    tree = ast.parse(SOURCE.read_text(encoding='utf-8'))
+    names = {'orientation_size', 'image_versions', 'image_download_urls',
+             'images_for_posts'}
+    body = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
+    if len(body) != len(names):
+        raise AssertionError('Unable to isolate the image helpers')
+    exec(compile(ast.fix_missing_locations(ast.Module(body=body, type_ignores=[])),
+                 str(SOURCE), 'exec'), namespace)
+    return namespace
+
+
+class ImageVersionTests(unittest.TestCase):
+    def setUp(self):
+        self.ns = load_image_helpers({})
+        self.urls = self.ns['image_download_urls']
+
+    def test_sample_used_only_when_it_covers_the_output(self):
+        post = {'file_url': 'https://x/orig.png', 'sample_url': 'https://x/s.jpg',
+                'sample_width': 850, 'sample_height': 1043}
+        # Portrait: output 512 x 768 without Crop center.
+        self.assertEqual(self.urls(post), ['https://x/s.jpg', 'https://x/orig.png'])
+        self.assertEqual(self.urls(post, (832, 1024)), ['https://x/s.jpg', 'https://x/orig.png'])
+        # 1024 x 1024 with Crop center: an 850 px sample would be upscaled.
+        self.assertEqual(self.urls(post, (1024, 1024)), ['https://x/orig.png'])
+
+    def test_smallest_sufficient_first(self):
+        post = {'file_url': 'https://k/orig.png',
+                'sample_url': 'https://k/sample.jpg', 'sample_width': 1500, 'sample_height': 1125,
+                'jpeg_url': 'https://k/jpeg.jpg', 'jpeg_width': 3500, 'jpeg_height': 2625}
+        self.assertEqual(self.urls(post, (1024, 768)),
+                         ['https://k/sample.jpg', 'https://k/jpeg.jpg', 'https://k/orig.png'])
+        self.assertEqual(self.urls(post, (2048, 1536)),
+                         ['https://k/jpeg.jpg', 'https://k/orig.png'])
+
+    def test_api_shapes(self):
+        versions = self.ns['image_versions']
+        # Safebooru with no sample: width 0 and the original URL.
+        self.assertEqual(versions({'file_url': 'https://s/a.jpg', 'sample': False,
+                                   'sample_url': 'https://s/a.jpg', 'sample_width': 0,
+                                   'sample_height': 0}), [])
+        danbooru = {'file_url': 'https://d/o.png', 'media_asset': {'variants': [
+            {'type': '720x720', 'url': 'https://d/720.webp', 'width': 720, 'height': 516},
+            {'type': 'sample', 'url': 'https://d/s.jpg', 'width': 850, 'height': 609},
+            {'type': 'original', 'url': 'https://d/o.png', 'width': 2529, 'height': 1812}]}}
+        self.assertEqual(versions(danbooru), [('https://d/s.jpg', 850, 609)])
+        e621 = {'file_url': 'https://e/o.png', 'files': {'sample': {
+            'width': 1133, 'height': 850, 'jpg': 'https://e/s.jpg', 'webp': 'https://e/s.webp'}}}
+        self.assertEqual(versions(e621), [('https://e/s.jpg', 1133, 850)])
+        legacy = {'file_url': 'https://e/o.png',
+                  'sample': {'url': 'https://e/s2.jpg', 'width': 850, 'height': 600}}
+        self.assertEqual(versions(legacy), [('https://e/s2.jpg', 850, 600)])
+        # Gelbooru: sample flag 0 and an empty sample URL.
+        self.assertEqual(versions({'file_url': 'https://g/o.png', 'sample': 0,
+                                   'sample_url': '', 'sample_width': 0}), [])
+        self.assertEqual(self.urls({'file_url': None}), [])
+
+
+class ImagesForPostsTests(unittest.TestCase):
+    def setUp(self):
+        self.ns = load_image_helpers({'random': types.SimpleNamespace(choice=lambda xs: xs[0])})
+        self.pick = self.ns['images_for_posts']
+
+    def load(self, failing):
+        def load(post):
+            if post['id'] in failing:
+                raise RuntimeError('404')
+            return f"img{post['id']}"
+        return load
+
+    def run_quiet(self, *args, **kwargs):
+        import contextlib
+        import io
+        with contextlib.redirect_stdout(io.StringIO()):
+            return self.pick(*args, **kwargs)
+
+    def test_failed_post_is_swapped_and_its_prompt_follows(self):
+        pool = [{'id': n} for n in range(5)]
+        posts = [pool[0], pool[1]]
+        images = self.run_quiet(posts, [0, 1], pool, self.load({1, 2}))
+        self.assertEqual([p['id'] for p in posts], [0, 3])
+        self.assertEqual(images, {0: 'img0', 1: 'img3'})
+
+    def test_same_prompt_post_is_swapped_everywhere(self):
+        pool = [{'id': n} for n in range(3)]
+        posts = [pool[0]] * 3
+        images = self.run_quiet(posts, [0, 1, 2], pool, self.load({0}))
+        self.assertEqual([p['id'] for p in posts], [1, 1, 1])
+        self.assertEqual(set(images.values()), {'img1'})
+
+    def test_no_spare_reuses_a_loaded_pair(self):
+        pool = [{'id': 0}, {'id': 1}]
+        posts = list(pool)
+        images = self.run_quiet(posts, [0, 1], pool, self.load({1}))
+        self.assertEqual([p['id'] for p in posts], [0, 0])
+        self.assertEqual(images, {0: 'img0', 1: 'img0'})
+
+    def test_only_needed_posts_are_loaded(self):
+        pool = [{'id': n} for n in range(3)]
+        posts = list(pool)
+        images = self.run_quiet(posts, [2], pool, self.load(set()))
+        self.assertEqual(images, {2: 'img2'})
+
+    def test_errors(self):
+        pool = [{'id': 0}, {'id': 1}]
+        with self.assertRaisesRegex(RuntimeError, 'none of the 2 booru image'):
+            self.run_quiet(list(pool), [0, 1], pool, self.load({0, 1}))
+        with self.assertRaisesRegex(RuntimeError, 'image of post 7 could not be downloaded'):
+            self.run_quiet([{'id': 7}], [0], [{'id': 7}], self.load({7}), fixed=True)
+        # Swaps are bounded.
+        pool = [{'id': n} for n in range(50)]
+        calls = []
+
+        def failing(post):
+            calls.append(post)
+            raise RuntimeError('404')
+        with self.assertRaises(RuntimeError):
+            self.run_quiet([pool[0]], [0], pool, failing, max_swaps=3,
+                           max_failures_first=100)
+        self.assertEqual(len(calls), 4)
+        # Host down: stop after the first few failures, for all images.
+        calls.clear()
+        with self.assertRaisesRegex(RuntimeError, 'none of the 4'):
+            self.run_quiet(pool[:4], [0, 1, 2, 3], pool, failing)
+        self.assertEqual(len(calls), 3)
+        # Once one image loaded, swaps continue as usual.
+        pool = [{'id': n} for n in range(10)]
+        posts = [pool[0], pool[1]]
+        self.run_quiet(posts, [0, 1], pool, self.load({1, 2, 3, 4, 5}))
+        self.assertEqual([p['id'] for p in posts], [0, 6])
+
+
 class RemovedFeaturesTests(unittest.TestCase):
     """LoRAnado, the File panel, Deepbooru and Extra (except Use cache) are gone."""
 
@@ -198,7 +330,7 @@ class RemovedFeaturesTests(unittest.TestCase):
         for name in ('lora_enabled', 'loranado', 'use_search_txt', 'use_remove_txt',
                      'use_deepbooru', 'from modules import deepbooru', 'mix_prompt',
                      'chaos_mode', 'negative_mode', 'use_same_seed', 'model_hijack',
-                     'sd-webui-controlnet'):
+                     'sd-webui-controlnet', 'pic.re', 'Yandere', "'yande.re'"):
             self.assertNotIn(name, source)
         self.assertIn("'use_cache'", source)
 

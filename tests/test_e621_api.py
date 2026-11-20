@@ -3,6 +3,7 @@ import ast
 import types
 import unittest
 from pathlib import Path
+from urllib.parse import unquote_plus
 
 
 class Response:
@@ -61,8 +62,10 @@ class E621AdapterTests(unittest.TestCase):
         source = Path(__file__).resolve().parents[1] / 'scripts' / 'ranbooru.py'
         tree = ast.parse(source.read_text(encoding='utf-8'))
         classes = [n for n in tree.body
-                   if isinstance(n, ast.ClassDef) and n.name in ('Booru', 'e621')]
-        if len(classes) != 2:
+                   if isinstance(n, (ast.ClassDef, ast.FunctionDef)) and n.name in (
+                       'Booru', 'e621', 'has_own_order', 'with_search_term',
+                       'random_or_paged')]
+        if len(classes) != 5:
             raise AssertionError('Unable to isolate Booru and e621 classes')
         cls.module = compile(
             ast.fix_missing_locations(ast.Module(body=classes, type_ignores=[])),
@@ -76,14 +79,14 @@ class E621AdapterTests(unittest.TestCase):
             self.pages.append((low, high))
             return high
 
-        self.ns = {'requests': self.requests, 'booru_http': self.requests, 'POST_AMOUNT': 100, 'COUNT': 0,
+        self.ns = {'requests': self.requests, 'booru_http': self.requests, 'POST_AMOUNT': 100, 'COUNT': 0, 'unquote_plus': unquote_plus,
                    'random': types.SimpleNamespace(randint=randint)}
         exec(self.module, self.ns)
         self.adapter = self.ns['e621']()
 
     def test_current_bare_list(self):
         self.requests.responses = [Response([current_post()])]
-        posts = self.adapter.get_data('&tags=-animated', 3)['post']
+        posts = self.adapter.get_data('&tags=-animated+order:score', 3)['post']
         self.assertEqual(len(posts), 1)
         self.assertEqual(posts[0]['tags'], '1girl solo sitting')
         self.assertEqual(posts[0]['score'], 5)
@@ -91,8 +94,29 @@ class E621AdapterTests(unittest.TestCase):
         self.assertEqual(self.ns['COUNT'], 1)
         self.assertEqual(len(self.requests.calls), 1)
         url, kwargs = self.requests.calls[0]
-        self.assertIn('&page=3&tags=-animated', url)
+        self.assertIn('&page=3&tags=-animated+order:score', url)
         self.assertEqual(kwargs['timeout'], 20)
+
+    def test_random_draw_from_the_whole_search(self):
+        self.requests.responses = [Response([current_post(8)])]
+        posts = self.adapter.get_data('&tags=-animated+solo', 3)['post']
+        self.assertEqual([p['id'] for p in posts], [8])
+        url, kwargs = self.requests.calls[0]
+        self.assertIn('&page=1&tags=-animated+solo+order:random', url)
+        self.assertIs(kwargs['cache'], False)
+        self.assertEqual(self.pages, [])
+
+    def test_random_draw_empty_is_an_empty_search(self):
+        self.requests.responses = [Response([])]
+        self.assertEqual(self.adapter.get_data('&tags=solo', 3)['post'], [])
+        self.assertEqual(len(self.requests.calls), 1)
+
+    def test_random_draw_refused_walks_a_page(self):
+        self.requests.responses = [Response({'success': False, 'message': 'bad'}, status=422),
+                                   Response([current_post(2)])]
+        posts = self.adapter.get_data('&tags=solo', 3)['post']
+        self.assertEqual([p['id'] for p in posts], [2])
+        self.assertEqual(self.pages, [(1, 3)])
 
     def test_anonymous_by_default(self):
         self.requests.responses = [Response([current_post()])]
@@ -131,24 +155,25 @@ class E621AdapterTests(unittest.TestCase):
 
     def test_pages_are_one_based_and_capped(self):
         self.requests.responses = [Response([])] * 3
-        self.adapter.get_data('', 0)
-        self.adapter.get_data('', 10)
-        self.adapter.get_data('', 5000)
+        self.adapter.get_data('&tags=order:id', 0)
+        self.adapter.get_data('&tags=order:id', 10)
+        self.adapter.get_data('&tags=order:id', 5000)
         self.assertEqual(self.pages, [(1, 1), (1, 10), (1, 750)])
 
     def test_error_object_raises_readable_error(self):
         self.requests.responses = [Response(
             {'success': False, 'message': 'You cannot go beyond page 750.'}, status=410)]
         with self.assertRaisesRegex(RuntimeError, 'HTTP 410.*page 750'):
-            self.adapter.get_data('', 1)
+            self.adapter.get_data('&tags=order:id', 1)
 
     def test_rate_limit_and_non_json(self):
         self.requests.responses = [Response({'success': False, 'message': 'slow down'}, status=429)]
         with self.assertRaisesRegex(RuntimeError, 'Rate limit'):
-            self.adapter.get_data('', 1)
+            self.adapter.get_data('', 1)  # not retried as a random page
+        self.assertEqual(len(self.requests.calls), 1)
         self.requests.responses = [Response(invalid_json=True)]
         with self.assertRaisesRegex(RuntimeError, 'non-JSON'):
-            self.adapter.get_data('', 1)
+            self.adapter.get_data('&tags=order:id', 1)
 
     def test_network_error(self):
         self.requests.responses = [ConnectionError('down')]

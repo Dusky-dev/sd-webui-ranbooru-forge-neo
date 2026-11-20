@@ -58,9 +58,10 @@ class GelbooruResponseTests(unittest.TestCase):
         tree = ast.parse(source_file.read_text(encoding="utf-8"))
         classes = [
             node for node in tree.body
-            if isinstance(node, ast.ClassDef) and node.name in ("Booru", "Gelbooru")
+            if isinstance(node, (ast.ClassDef, ast.FunctionDef)) and node.name in (
+                "Booru", "Gelbooru", "has_own_order", "with_search_term")
         ]
-        if len(classes) != 2:
+        if len(classes) != 4:
             raise AssertionError("Unable to isolate both Booru and Gelbooru classes")
         cls.isolated_module = compile(
             ast.fix_missing_locations(ast.Module(body=classes, type_ignores=[])),
