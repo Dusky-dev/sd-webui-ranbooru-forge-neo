@@ -444,6 +444,43 @@ POSE_CREATURE_TRAIT_NOUNS = frozenset((
     'ears', 'tail', 'tails', 'horns', 'horn', 'wings', 'halo', 'girl', 'boy',
 ))
 
+# e621-only fallback: colour/pattern + body noun (tan_pawpads, striped_tail).
+POSE_E621_BODY_NOUNS = frozenset((
+    'pawpads', 'claws', 'markings', 'stripes', 'spots', 'scales',
+    'countershading', 'inner_ear', 'eyelids', 'mustache', 'facial_hair',
+    'beard', 'face', 'head', 'ears', 'tail', 'nose', 'muzzle', 'fur', 'body',
+    'hair', 'horns', 'antlers', 'wings', 'feathers', 'hands', 'feet', 'paws',
+    'hooves', 'mane', 'beak', 'tongue', 'sclera', 'pupils', 'eyes', 'chest',
+))
+POSE_E621_BODY_MODIFIERS = POSE_COLOR_WORDS | frozenset((
+    'two', 'tone', 'multi', 'striped', 'spotted', 'hand', 'foot', 'tan',
+    'tricolor', 'big', 'long', 'short', 'small', 'fluffy', 'scut', 'ghost',
+    'dipstick', 'curled', 'prehensile', 'spiked', 'ventral',
+))
+POSE_E621_BODY_PREFIXES = ('countershade_',)
+POSE_E621_BODY_SUFFIXES = ('_tuft', '_tufts', '_markings', '_marking', '_pawpads')
+
+# e621-only clothing fallback: colour/pattern + e621 garment noun
+# (denim_bottomwear, pattern_clothing). The bare nouns stay, like on Danbooru.
+POSE_E621_CLOTHING_NOUNS = frozenset((
+    'topwear', 'bottomwear', 'footwear', 'handwear', 'headwear', 'legwear',
+    'armwear', 'swimwear', 'underwear', 'neckwear', 'eyewear', 'clothing',
+    'outfit', 'accessory', 'piercing', 'piercings', 'thigh_highs',
+    'thigh_socks', 'hotpants', 'bodysuit', 'collar', 'jewelry',
+))
+POSE_E621_CLOTHING_MODIFIERS = frozenset((
+    'denim', 'pattern', 'camo', 'checkered', 'plaid', 'spotted', 'striped',
+    'baggy', 'leather', 'latex', 'rubber', 'spiked', 'studded', 'metal',
+    'gold', 'golden', 'silver', 'fishnet', 'lace', 'frilly', 'knitted',
+    'two-piece', 'one-piece',
+))
+# States, not garments: open_clothing / torn_topwear stay, like Danbooru's
+# open_clothes and torn_clothes.
+POSE_E621_CLOTHING_STATES = frozenset((
+    'open', 'torn', 'unbuttoned', 'wet', 'transparent', 'shiny', 'loose',
+    'oversized', 'tight', 'cropped',
+))
+
 POSE_CLOTHING_MODIFIERS = POSE_COLOR_WORDS | frozenset((
     'long', 'short', 'mini', 'micro', 'pencil', 'pleated', 'frilled',
     'striped', 'vertical-striped', 'plaid', 'checkered', 'polka', 'dot',
@@ -474,7 +511,8 @@ POSE_CATEGORY_FIELDS = (
 
 POSE_EMPTY_GROUPS = {
     'traits': frozenset(), 'clothing': frozenset(), 'keep': frozenset(),
-    'clothing_nouns': frozenset(),
+    'clothing_nouns': frozenset(), 'e621_traits': frozenset(),
+    'e621_keep': frozenset(), 'e621_clothing': frozenset(),
 }
 
 
@@ -487,7 +525,8 @@ def load_pose_tag_groups(path):
             name: frozenset(
                 tag for tag in data.get(name, []) if isinstance(tag, str)
             )
-            for name in ('traits', 'clothing', 'keep')
+            for name in ('traits', 'clothing', 'keep', 'e621_traits', 'e621_keep',
+                         'e621_clothing')
         }
     except (OSError, ValueError, AttributeError, TypeError) as exc:
         print(f'[Ranbooru] Only Poses tag lists unavailable ({exc}); '
@@ -570,8 +609,13 @@ def _matches_structure(words, nouns, modifiers):
 
 
 def is_characteristic_tag(tag, strip_traits=True, strip_clothing=False,
-                          excluded=(), groups=None, names=(), qualifiers=()):
-    """Whether Only Poses / clothing stripping should remove this tag."""
+                          excluded=(), groups=None, names=(), qualifiers=(),
+                          e621_vocab=False):
+    """Whether Only Poses / clothing stripping should remove this tag.
+
+    e621_vocab adds e621's own body vocabulary (tufts, markings, pawpads)
+    and its pose/expression keep list; it is set only for e621 posts.
+    """
     if groups is None:
         groups = pose_tag_groups
     norm = _normalize_pose_tag(tag)
@@ -583,11 +627,21 @@ def is_characteristic_tag(tag, strip_traits=True, strip_clothing=False,
         return True
     if norm in groups['keep']:
         return False
+    if e621_vocab and norm in groups['e621_keep']:
+        return False
     words = norm.split('_')
 
     if strip_traits:
         # Danbooru name list (character/copyright/artist), when enabled.
         if norm in names or has_series_qualifier(norm, qualifiers):
+            return True
+        if e621_vocab and (
+            norm in groups['e621_traits']
+            or norm.startswith(POSE_E621_BODY_PREFIXES)
+            or norm.endswith(POSE_E621_BODY_SUFFIXES)
+            or _matches_structure(words, POSE_E621_BODY_NOUNS,
+                                  POSE_E621_BODY_MODIFIERS)
+        ):
             return True
         if norm in groups['traits']:
             return True
@@ -600,6 +654,14 @@ def is_characteristic_tag(tag, strip_traits=True, strip_clothing=False,
     if strip_clothing:
         if norm in groups['clothing']:
             return True
+        if e621_vocab and (
+            norm in groups['e621_clothing']
+            or _matches_structure(
+                words, POSE_E621_CLOTHING_NOUNS | groups['clothing_nouns'],
+                (POSE_E621_CLOTHING_MODIFIERS | POSE_CLOTHING_MODIFIERS)
+                - POSE_E621_CLOTHING_STATES)
+        ):
+            return True
         if _matches_structure(words, groups['clothing_nouns'], POSE_CLOTHING_MODIFIERS):
             return True
 
@@ -607,14 +669,16 @@ def is_characteristic_tag(tag, strip_traits=True, strip_clothing=False,
 
 
 def filter_pose_tags(tags, strip_traits=True, strip_clothing=False,
-                     excluded=(), groups=None, names=(), qualifiers=()):
+                     excluded=(), groups=None, names=(), qualifiers=(),
+                     e621_vocab=False):
     """Return the tags (in order) that survive Only Poses / clothing stripping."""
     if not strip_traits and not strip_clothing:
         return list(tags)
     return [
         tag for tag in tags
         if not is_characteristic_tag(tag, strip_traits, strip_clothing,
-                                     excluded, groups, names, qualifiers)
+                                     excluded, groups, names, qualifiers,
+                                     e621_vocab)
     ]
 
 
@@ -713,9 +777,6 @@ def check_exception(booru, parameters):
 
     if booru == 'yande.re' and post_id:
         raise Exception("Yande.re does not support post IDs")
-
-    if booru == 'e621' and post_id:
-        raise Exception("e621 does not support post IDs")
 
     # Danbooru's public search limit is normally two tags. Previously Ranbooru
     # used a slot for its automatic -animated filter, leaving only one for users.
@@ -1604,27 +1665,51 @@ class e621(Booru):
             result = result['posts']
         elif isinstance(result, dict) and isinstance(result.get('post'), dict):
             result = [result['post']]
+        elif isinstance(result, dict) and 'id' in result:
+            # /posts/{id}.json returns a bare post object.
+            result = [result]
         if not isinstance(result, list):
             raise RuntimeError(
                 f'[Ranbooru] e621 API returned invalid data (HTTP {status}).'
             )
         return result
 
-    @classmethod
-    def _normalize_post(cls, post):
-        """Map an e621 post onto the fields before_process reads, or None to skip it."""
-        if not isinstance(post, dict):
-            return None
-        flags = post.get('flags')
-        if isinstance(flags, dict) and flags.get('deleted'):
-            return None
+    @staticmethod
+    def _file_url(post):
         files = post.get('files') or post.get('file') or {}
         original = files.get('original', files) if isinstance(files, dict) else {}
         file_url = original.get('url') if isinstance(original, dict) else None
+        return file_url if isinstance(file_url, str) and file_url else None
+
+    @classmethod
+    def _skip_reason(cls, post):
+        """Why a post can't be used, or None when it can."""
+        if not isinstance(post, dict):
+            return 'malformed post data'
+        flags = post.get('flags')
+        if isinstance(flags, dict) and flags.get('deleted'):
+            return 'the post was deleted'
         # Anonymous requests get no image URL for some posts; skip those so
         # img2img and Deepbooru never fall back to an unrelated picture.
-        if not isinstance(file_url, str) or not file_url:
+        if cls._file_url(post) is None:
+            return 'e621 gives no image URL for it without logging in'
+        tags = post.get('tags')
+        if isinstance(tags, dict):
+            tags = [t for values in tags.values() if isinstance(values, list) for t in values]
+        elif isinstance(tags, str):
+            tags = tags.split()
+        if not isinstance(tags, list):
+            return 'it has no tags'
+        if 'animated' in tags:
+            return 'it is animated'
+        return None
+
+    @classmethod
+    def _normalize_post(cls, post):
+        """Map an e621 post onto the fields before_process reads, or None to skip it."""
+        if cls._skip_reason(post) is not None:
             return None
+        file_url = cls._file_url(post)
 
         tags = post.get('tags')
         if isinstance(tags, dict):
@@ -1645,8 +1730,6 @@ class e621(Booru):
         if not isinstance(tags, list):
             return None
         tags = [tag for tag in tags if isinstance(tag, str) and tag]
-        if 'animated' in tags:
-            return None
 
         stats = post.get('stats') if isinstance(post.get('stats'), dict) else post
         score = stats.get('score', 0)
@@ -1685,11 +1768,30 @@ class e621(Booru):
         return {'post': posts}
 
     def get_post(self, add_tags, max_pages=10, id=''):
-        return self.get_data(
-            add_tags,
-            max_pages,
-            "&id=" + id
-        )
+        global COUNT
+
+        post_id = str(id).strip()
+        if not post_id.isdigit():
+            raise ValueError(
+                f'[Ranbooru] e621 post IDs are numbers; got {post_id!r}.'
+            )
+        try:
+            raw_posts = self._request(f'https://e621.net/posts/{post_id}.json')
+        except RuntimeError as exc:
+            if 'HTTP 404' in str(exc):
+                raise RuntimeError(
+                    f'[Ranbooru] e621 post {post_id} was not found.'
+                ) from exc
+            raise
+        if not raw_posts:
+            raise RuntimeError(f'[Ranbooru] e621 post {post_id} was not found.')
+        reason = self._skip_reason(raw_posts[0])
+        if reason:
+            raise RuntimeError(
+                f'[Ranbooru] e621 post {post_id} cannot be used: {reason}.'
+            )
+        COUNT = 1
+        return {'post': [self._normalize_post(raw_posts[0])]}
 
     # Posts no longer carry tag categories, so look them up: meta, lore and
     # invalid tags never belonged in a prompt (the old adapter skipped those
@@ -3571,7 +3673,8 @@ class Script(scripts.Script):
                     strip_clothing=strip_clothing,
                     excluded=pose_excluded_tags,
                     names=pose_names,
-                    qualifiers=pose_qualifiers
+                    qualifiers=pose_qualifiers,
+                    e621_vocab=isinstance(api_url, e621)
                 )
 
                 new_prompt = ', '.join(tag.strip() for tag in prompt_tags if tag.strip())
