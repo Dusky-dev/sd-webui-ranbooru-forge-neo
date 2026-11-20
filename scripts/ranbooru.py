@@ -762,6 +762,30 @@ def img2img_settings_from(p, img2img_class):
     }
 
 
+def per_image_values(value, total):
+    """A list with one entry per image: a single value repeated, or a list
+    cycled/trimmed to `total`."""
+    values = list(value) if isinstance(value, (list, tuple)) else [value]
+    if not values:
+        values = ['']
+    return [values[i % len(values)] for i in range(total)]
+
+
+def per_image_seeds(p, total):
+    """The seed of every image of the txt2img run (Forge fills all_seeds)."""
+    seeds = list(getattr(p, 'all_seeds', None) or [])
+    if len(seeds) >= total:
+        return seeds[:total]
+    seed = p.seed[0] if isinstance(p.seed, (list, tuple)) and p.seed else p.seed
+    try:
+        base = int(seeds[0] if seeds else seed)
+    except (TypeError, ValueError):
+        base = -1
+    if base == -1:
+        return [-1] * total
+    return [base + i for i in range(total)]
+
+
 def source_infotext(infotexts, first_image_index, num):
     """Infotext of the num-th generated image (a grid, if any, comes first)."""
     if not infotexts:
@@ -3269,41 +3293,82 @@ class Script(scripts.Script):
                     self.last_img[0]
                 )
 
-            # Second pass: a real img2img run on the booru images. Copy the
+            # Second pass: real img2img runs on the booru images. Copy the
             # generation settings that exist on this WebUI build (styles,
             # variation seed, distilled CFG, clip skip and other overrides...),
             # but not scripts, which would run Ranbooru again.
-            settings = img2img_settings_from(p, StableDiffusionProcessingImg2Img)
-            settings.update(
-                sd_model=shared.sd_model,
-                outpath_samples=(
-                    shared.opts.outdir_samples
-                    or shared.opts.outdir_img2img_samples
-                ),
-                outpath_grids=(
-                    shared.opts.outdir_grids
-                    or shared.opts.outdir_img2img_grids
-                ),
-                steps=self.real_steps,
-                width=width,
-                height=height,
-                init_images=self.last_img,
-                denoising_strength=denoising,
+            # Forge Neo takes at most batch_size init images per run, so run
+            # one img2img pass per batch, each with its own images, prompts
+            # and seeds.
+            batch_size = max(1, int(p.batch_size))
+            n_iter = max(1, int(p.n_iter))
+            total = batch_size * n_iter
+            prompts = per_image_values(p.prompt, total)
+            negative_prompts = per_image_values(p.negative_prompt, total)
+            seeds = per_image_seeds(p, total)
+            init_images = per_image_values(self.last_img, total)
+
+            base_settings = img2img_settings_from(
+                p, StableDiffusionProcessingImg2Img
             )
-            p = StableDiffusionProcessingImg2Img(**settings)
+            images, infotexts, first_image = [], [], 0
+            for batch in range(n_iter):
+                state = getattr(shared, 'state', None)
+                if batch and state is not None and (
+                    getattr(state, 'interrupted', False)
+                    or getattr(state, 'stopping_generation', False)
+                ):
+                    break
 
-            proc = process_images(p)
+                part = slice(batch * batch_size, (batch + 1) * batch_size)
+                settings = dict(base_settings)
+                settings.update(
+                    sd_model=shared.sd_model,
+                    outpath_samples=(
+                        shared.opts.outdir_samples
+                        or shared.opts.outdir_img2img_samples
+                    ),
+                    outpath_grids=(
+                        shared.opts.outdir_grids
+                        or shared.opts.outdir_img2img_grids
+                    ),
+                    prompt=prompts[part],
+                    negative_prompt=negative_prompts[part],
+                    seed=seeds[part],
+                    batch_size=batch_size,
+                    n_iter=1,
+                    steps=self.real_steps,
+                    width=width,
+                    height=height,
+                    init_images=init_images[part],
+                    denoising_strength=denoising,
+                )
+                proc = process_images(
+                    StableDiffusionProcessingImg2Img(**settings)
+                )
 
-            processed.images = proc.images
-            processed.infotexts = proc.infotexts
+                if n_iter == 1:
+                    # One run: keep Forge's own grid, if it made one.
+                    images = list(proc.images)
+                    infotexts = list(proc.infotexts)
+                    first_image = proc.index_of_first_image
+                else:
+                    # Several runs: their images only, no per-run grids.
+                    start = proc.index_of_first_image or 0
+                    images.extend(proc.images[start:])
+                    infotexts.extend(proc.infotexts[start:])
+
+            processed.images = images
+            processed.infotexts = infotexts
+            processed.index_of_first_image = first_image
 
             # Show the source booru image(s) after the results, each with the
             # infotext of the image it produced.
             sources = self.last_img[:1] if use_last_img else self.last_img
-            for num, img in enumerate(sources):
+            for num, img in enumerate(sources[:len(images) - first_image]):
                 processed.images.append(img)
                 processed.infotexts.append(
-                    source_infotext(proc.infotexts, proc.index_of_first_image, num)
+                    source_infotext(infotexts, first_image, num)
                 )
 
     def random_number(self, sorting_order, size, available_count):

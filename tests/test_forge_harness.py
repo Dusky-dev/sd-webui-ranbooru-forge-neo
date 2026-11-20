@@ -276,6 +276,7 @@ class ForgeHarnessTests(unittest.TestCase):
 
     def generate(self, batch=1, n_iter=1, **overrides):
         """before_process, the txt2img run, then postprocess, like Forge."""
+        self.calls.clear()
         script = self.rb.Script()
         p = self.processing(batch, n_iter)
         with mock.patch.object(self.rb.requests, 'get', side_effect=fake_get), \
@@ -333,9 +334,42 @@ class ForgeHarnessTests(unittest.TestCase):
             with self.subTest(batch=batch, n_iter=n_iter, use_last_img=last):
                 p, processed = self.generate(batch, n_iter, use_img2img=True, use_last_img=last)
                 self.assertEqual(len(processed.images), len(processed.infotexts))
+                txt2img = [c for c in self.calls if not hasattr(c, 'init_images')]
                 img2img = [c for c in self.calls if hasattr(c, 'init_images')]
-                self.assertTrue(img2img)
-                self.assertTrue(all(c.steps == 20 for c in img2img))
+                # The txt2img run is the 1-step throwaway pass.
+                self.assertEqual([c.steps for c in txt2img], [1])
+                # One img2img pass per batch, each with its own slice.
+                self.assertEqual(len(img2img), n_iter)
+                self.assertTrue(all(c.steps == 20 and c.n_iter == 1 for c in img2img))
+                self.assertTrue(all(len(c.init_images) == batch for c in img2img))
+                self.assertEqual([s for c in img2img for s in c.all_seeds],
+                                 txt2img[0].all_seeds)
+                self.assertEqual([pr for c in img2img for pr in c.all_prompts],
+                                 txt2img[0].all_prompts)
+                # Results first (grid only for a single run), then the sources.
+                generated = batch * n_iter + (1 if n_iter == 1 and batch > 1 else 0)
+                sources = 1 if last else batch * n_iter
+                self.assertEqual(len(processed.images), generated + sources)
+                self.assertEqual(processed.index_of_first_image,
+                                 1 if n_iter == 1 and batch > 1 else 0)
+                self.assertTrue(all(not isinstance(i, str) for i in processed.images[generated:]))
+
+    def test_interrupt_stops_between_passes(self):
+        state = self.rb.shared.state
+        original = self.rb.process_images
+
+        def interrupting(p):
+            result = original(p)
+            if hasattr(p, 'init_images'):
+                state.interrupted = True
+            return result
+
+        try:
+            with mock.patch.object(self.rb, 'process_images', side_effect=interrupting):
+                self.generate(1, 3, use_img2img=True)
+        finally:
+            state.interrupted = False
+        self.assertEqual(len([c for c in self.calls if hasattr(c, 'init_images')]), 1)
 
 
 if __name__ == '__main__':
