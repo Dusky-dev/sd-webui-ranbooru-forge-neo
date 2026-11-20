@@ -138,6 +138,31 @@ class E621AdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'Unable to contact e621'):
             self.adapter.get_data('', 1)
 
+    def test_name_tag_lookup_is_chunked_and_cached(self):
+        self.ns['e621']._category_cache.clear()
+        self.adapter.LOOKUP_CHUNK = 2
+        self.requests.responses = [
+            Response([{'name': 'some_artist', 'category': 1},
+                      {'name': 'solo', 'category': 0}]),
+            Response([{'name': 'wolf', 'category': 5},
+                      {'name': "zeta_(o'neil)", 'category': 4}]),
+        ]
+        found = self.adapter.name_tags({'solo', 'some_artist', 'wolf', "zeta_(o'neil)"})
+        self.assertEqual(found, {'some_artist', 'wolf', "zeta_(o'neil)"})
+        self.assertEqual(len(self.requests.calls), 2)
+        self.assertIn('search[name]=solo,some_artist', self.requests.calls[0][0])
+        self.assertIn('zeta_%28o%27neil%29', self.requests.calls[1][0])
+        # Cached: no further requests.
+        self.assertEqual(self.adapter.name_tags({'wolf', 'solo'}), {'wolf'})
+        self.assertEqual(len(self.requests.calls), 2)
+
+    def test_name_tag_lookup_fails_soft(self):
+        self.ns['e621']._category_cache.clear()
+        self.requests.responses = [ConnectionError('down')]
+        self.assertEqual(self.adapter.name_tags({'some_artist'}), set())
+        self.requests.responses = [Response({'success': False}, status=429)]
+        self.assertEqual(self.adapter.name_tags({'other'}), set())
+
 
 if __name__ == '__main__':
     unittest.main()

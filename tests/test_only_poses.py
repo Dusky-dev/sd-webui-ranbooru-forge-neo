@@ -61,6 +61,7 @@ class TestOnlyPoses(unittest.TestCase):
             'heterochromia', 'demon_horns', 'slit_pupils', 'grey_eyes',
             'ponytail', 'braid', 'cat_tail', 'cat_girl', 'blue_halo', 'horns',
             'wings', 'fang', 'tsurime', 'mole_under_eye', 'thick_thighs',
+            'blue_fur', 'white_body', 'green_scales', 'two-tone_fur',
         ):
             self.assertTrue(self.is_char(tag), tag)
 
@@ -74,6 +75,7 @@ class TestOnlyPoses(unittest.TestCase):
             'skirt_lift', 'hand_in_pocket', 'white_shirt', 'pleated_skirt',
             'parted_lips', 'v-shaped_eyebrows', 'looking_back', 'crossed_arms',
             'magical_girl', 'multiple_boys', 'hand_on_own_chest',
+            'full_body', 'upper_body', 'fur', 'body', 'cowboy_shot',
         ):
             self.assertFalse(self.is_char(tag), tag)
 

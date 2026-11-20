@@ -425,6 +425,8 @@ POSE_COLOR_WORDS = frozenset((
 POSE_COLOR_TRAIT_NOUNS = frozenset((
     'hair', 'eyes', 'skin', 'pupils', 'sclera', 'eyelashes', 'eyebrows',
     'streaks',
+    # e621 body colours: blue_fur, white_body, green_scales.
+    'body', 'fur', 'scales', 'feathers',
 ))
 
 POSE_CREATURE_WORDS = frozenset((
@@ -1688,6 +1690,41 @@ class e621(Booru):
             max_pages,
             "&id=" + id
         )
+
+    # Only Poses: posts no longer carry tag categories, so look them up.
+    TAGS_URL = 'https://e621.net/tags.json?limit=320&search[name]='
+    NAME_CATEGORIES = {1: 'artist', 3: 'copyright', 4: 'character', 5: 'species'}
+    LOOKUP_CHUNK = 300
+    _category_cache = {}
+
+    def name_tags(self, tags):
+        """Artist/copyright/character/species tags among `tags`, via e621's tag API.
+
+        Results are cached per tag; on any error the remaining tags are simply
+        treated as unknown, so generation never fails because of this lookup.
+        """
+        from urllib.parse import quote
+        cache = self._category_cache
+        missing = sorted(t for t in set(tags) if t and t not in cache)
+        for start in range(0, len(missing), self.LOOKUP_CHUNK):
+            chunk = missing[start:start + self.LOOKUP_CHUNK]
+            url = self.TAGS_URL + quote(','.join(chunk), safe=',')
+            try:
+                response = requests.get(url, headers=self.headers, timeout=20)
+                rows = response.json() if response.status_code == 200 else None
+            except (requests.RequestException, ValueError) as exc:
+                rows = None
+                print(f'[Ranbooru] e621 tag category lookup failed: {exc}')
+            if not isinstance(rows, list):
+                print('[Ranbooru] e621 tag categories unavailable; '
+                      'names may remain in the prompt.')
+                break
+            for row in rows:
+                if isinstance(row, dict) and isinstance(row.get('name'), str):
+                    cache[row['name']] = row.get('category')
+            for tag in chunk:
+                cache.setdefault(tag, None)
+        return {t for t in set(tags) if cache.get(t) in self.NAME_CATEGORIES}
 
 
 def generate_chaos(pos_tags, neg_tags, chaos_amount):
@@ -3470,6 +3507,15 @@ class Script(scripts.Script):
                             f"Failed to load image "
                             f"{img}: {e}"
                         )
+
+            # e621 posts carry no categories; look up the prompt's tags.
+            if only_poses and isinstance(api_url, e621):
+                pose_excluded_tags.update(api_url.name_tags({
+                    _normalize_pose_tag(tag)
+                    for prompt in prompts
+                    for tag in html.unescape(prompt).split(',')
+                    if tag.strip()
+                }))
 
             new_prompts = []
 
