@@ -519,6 +519,13 @@ def load_pose_name_tags(path):
 POSE_NAME_LIST_BOORUS = ('gelbooru',)
 
 
+def pose_names_for(booru, only_poses, names_all_boorus, names):
+    """The Danbooru name list applies on Gelbooru, or anywhere when the experimental toggle is on."""
+    if only_poses and (booru in POSE_NAME_LIST_BOORUS or names_all_boorus):
+        return names
+    return frozenset()
+
+
 def _normalize_pose_tag(tag):
     """Compare tags in booru form: lower case, underscores, unescaped parens."""
     tag = tag.strip().lower().replace('\\(', '(').replace('\\)', ')')
@@ -3206,12 +3213,12 @@ class Script(scripts.Script):
             # Artist/character/copyright tags reported by the booru, gathered
             # from the whole page so mixed prompts are covered too.
             pose_excluded_tags = set()
-            pose_names = ()
             if only_poses:
                 for post in clean_posts:
                     pose_excluded_tags.update(post_category_tags(post))
-                if booru in POSE_NAME_LIST_BOORUS or names_all_boorus:
-                    pose_names = pose_name_tags
+            pose_names = pose_names_for(
+                booru, only_poses, names_all_boorus, pose_name_tags
+            )
 
             if not clean_posts:
                 raise ValueError(

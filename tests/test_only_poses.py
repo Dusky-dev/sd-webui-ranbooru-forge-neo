@@ -8,7 +8,7 @@ MODULE_PATH = Path(__file__).resolve().parents[1] / 'scripts' / 'ranbooru.py'
 FUNCTIONS = {
     '_normalize_pose_tag', '_matches_structure', 'is_characteristic_tag',
     'filter_pose_tags', 'post_category_tags', 'load_pose_tag_groups',
-    'load_pose_name_tags',
+    'load_pose_name_tags', 'pose_names_for',
 }
 GROUPS_PATH = MODULE_PATH.parents[1] / 'pose_tag_groups.json'
 NAMES_PATH = MODULE_PATH.parents[1] / 'pose_name_tags.json'
@@ -46,6 +46,7 @@ class TestOnlyPoses(unittest.TestCase):
         cls.groups = ns['pose_tag_groups']
         cls.names = ns['pose_name_tags']
         cls.load_names = staticmethod(ns['load_pose_name_tags'])
+        cls.pose_names_for = staticmethod(ns['pose_names_for'])
 
     def test_strips_appearance_traits(self):
         for tag in (
@@ -128,6 +129,14 @@ class TestOnlyPoses(unittest.TestCase):
             self.assertFalse(self.is_char(tag, True, True, names=self.names), tag)
         for tag in ('1girl', 'solo', 'sitting', 'smile', 'saturday_night_fever'):
             self.assertFalse(self.is_char(tag, names=self.names), tag)
+
+    def test_name_list_switch(self):
+        names_for = self.pose_names_for
+        names = frozenset({'hatsune_miku'})
+        self.assertEqual(names_for('gelbooru', True, False, names), names)
+        self.assertEqual(names_for('safebooru', True, False, names), frozenset())
+        self.assertEqual(names_for('safebooru', True, True, names), names)
+        self.assertEqual(names_for('gelbooru', False, True, names), frozenset())
 
     def test_missing_name_list_is_empty(self):
         self.assertEqual(self.load_names(str(NAMES_PATH) + '.missing'), frozenset())
