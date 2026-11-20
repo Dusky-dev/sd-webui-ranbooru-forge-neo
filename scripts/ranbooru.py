@@ -450,7 +450,7 @@ POSE_E621_BODY_NOUNS = frozenset((
     'countershading', 'inner_ear', 'eyelids', 'mustache', 'facial_hair',
     'beard', 'face', 'head', 'ears', 'tail', 'nose', 'muzzle', 'fur', 'body',
     'hair', 'horns', 'antlers', 'wings', 'feathers', 'hands', 'feet', 'paws',
-    'hooves', 'mane', 'beak', 'tongue', 'sclera', 'pupils', 'eyes',
+    'hooves', 'mane', 'beak', 'tongue', 'sclera', 'pupils', 'eyes', 'chest',
 ))
 POSE_E621_BODY_MODIFIERS = POSE_COLOR_WORDS | frozenset((
     'two', 'tone', 'multi', 'striped', 'spotted', 'hand', 'foot', 'tan',
@@ -459,6 +459,27 @@ POSE_E621_BODY_MODIFIERS = POSE_COLOR_WORDS | frozenset((
 ))
 POSE_E621_BODY_PREFIXES = ('countershade_',)
 POSE_E621_BODY_SUFFIXES = ('_tuft', '_tufts', '_markings', '_marking', '_pawpads')
+
+# e621-only clothing fallback: colour/pattern + e621 garment noun
+# (denim_bottomwear, pattern_clothing). The bare nouns stay, like on Danbooru.
+POSE_E621_CLOTHING_NOUNS = frozenset((
+    'topwear', 'bottomwear', 'footwear', 'handwear', 'headwear', 'legwear',
+    'armwear', 'swimwear', 'underwear', 'neckwear', 'eyewear', 'clothing',
+    'outfit', 'accessory', 'piercing', 'piercings', 'thigh_highs',
+    'thigh_socks', 'hotpants', 'bodysuit', 'collar', 'jewelry',
+))
+POSE_E621_CLOTHING_MODIFIERS = frozenset((
+    'denim', 'pattern', 'camo', 'checkered', 'plaid', 'spotted', 'striped',
+    'baggy', 'leather', 'latex', 'rubber', 'spiked', 'studded', 'metal',
+    'gold', 'golden', 'silver', 'fishnet', 'lace', 'frilly', 'knitted',
+    'two-piece', 'one-piece',
+))
+# States, not garments: open_clothing / torn_topwear stay, like Danbooru's
+# open_clothes and torn_clothes.
+POSE_E621_CLOTHING_STATES = frozenset((
+    'open', 'torn', 'unbuttoned', 'wet', 'transparent', 'shiny', 'loose',
+    'oversized', 'tight', 'cropped',
+))
 
 POSE_CLOTHING_MODIFIERS = POSE_COLOR_WORDS | frozenset((
     'long', 'short', 'mini', 'micro', 'pencil', 'pleated', 'frilled',
@@ -491,7 +512,7 @@ POSE_CATEGORY_FIELDS = (
 POSE_EMPTY_GROUPS = {
     'traits': frozenset(), 'clothing': frozenset(), 'keep': frozenset(),
     'clothing_nouns': frozenset(), 'e621_traits': frozenset(),
-    'e621_keep': frozenset(),
+    'e621_keep': frozenset(), 'e621_clothing': frozenset(),
 }
 
 
@@ -504,7 +525,8 @@ def load_pose_tag_groups(path):
             name: frozenset(
                 tag for tag in data.get(name, []) if isinstance(tag, str)
             )
-            for name in ('traits', 'clothing', 'keep', 'e621_traits', 'e621_keep')
+            for name in ('traits', 'clothing', 'keep', 'e621_traits', 'e621_keep',
+                         'e621_clothing')
         }
     except (OSError, ValueError, AttributeError, TypeError) as exc:
         print(f'[Ranbooru] Only Poses tag lists unavailable ({exc}); '
@@ -631,6 +653,14 @@ def is_characteristic_tag(tag, strip_traits=True, strip_clothing=False,
 
     if strip_clothing:
         if norm in groups['clothing']:
+            return True
+        if e621_vocab and (
+            norm in groups['e621_clothing']
+            or _matches_structure(
+                words, POSE_E621_CLOTHING_NOUNS | groups['clothing_nouns'],
+                (POSE_E621_CLOTHING_MODIFIERS | POSE_CLOTHING_MODIFIERS)
+                - POSE_E621_CLOTHING_STATES)
+        ):
             return True
         if _matches_structure(words, groups['clothing_nouns'], POSE_CLOTHING_MODIFIERS):
             return True

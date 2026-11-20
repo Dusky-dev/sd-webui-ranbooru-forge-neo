@@ -164,6 +164,23 @@ class TestOnlyPoses(unittest.TestCase):
         for tag in self.groups['e621_keep']:
             self.assertFalse(self.is_char(tag, True, True, e621_vocab=True), tag)
 
+    def test_e621_clothing_only_with_clothing_toggle_on_e621(self):
+        for tag in ('topwear', 'bottomwear', 'black_bottomwear', 'denim_bottomwear',
+                    'ear_piercing', 'thigh_highs', 'pattern_clothing', 'eyewear',
+                    'two-piece_swimsuit', 'spiked_jacket'):
+            self.assertTrue(self.is_char(tag, False, True, e621_vocab=True), tag)
+            self.assertFalse(self.is_char(tag, True, False, e621_vocab=True), tag)
+            self.assertFalse(self.is_char(tag, False, True) and tag in ('topwear', 'bottomwear'), tag)
+        # Presence/state tags and actions stay, as on Danbooru.
+        for tag in ('clothing', 'clothed', 'clothed_anthro', 'underwear_only', 'nude',
+                    'topless', 'shirt_lift', 'clothing_lift', 'open_clothing',
+                    'torn_topwear', 'wet_clothing', 'text_on_clothing',
+                    'holding_clothing', 'raised_shirt'):
+            self.assertFalse(self.is_char(tag, True, True, e621_vocab=True), tag)
+        # Body tags belong to Only poses, not the clothing toggle.
+        for tag in ('socks_(marking)', 'pawpads', 'gloves_(marking)'):
+            self.assertFalse(self.is_char(tag, False, True, e621_vocab=True), tag)
+
     def test_name_list_switch(self):
         names_for = self.pose_names_for
         names = frozenset({'hatsune_miku'})

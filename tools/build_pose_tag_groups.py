@@ -195,6 +195,39 @@ E621_TRAIT_GROUPS = {
                  'scars', 'tattoos'],
 }
 E621_KEEP_GROUPS = {'pose': ALL, 'facial_expressions': ALL, 'touching': ALL}
+
+# Clothing toggle on e621. Like the Danbooru lists, garment tags go, while
+# presence/state tags stay (clothing, clothed_*, *_only, nude, topless) and
+# so do actions and states (shirt_lift, torn_*, wet_*, translucent_*).
+E621_CLOTHING_GROUPS = {
+    'clothes': [
+        'general colors', 'armwear', 'bottomwear', 'footwear', 'handwear',
+        'headwear', 'legwear', 'swimwear', 'topwear', 'underwear',
+        'arm warmer colors', 'bandanna colors', 'boots colors', 'bra colors',
+        'briefs colors', 'cape colors', 'dress colors', 'gloves colors',
+        'hat colors', 'panties colors', 'pants colors', 'sandals colors',
+        'scarf colors', 'shirt colors', 'shoes colors', 'shorts colors',
+        'skirt colors', 'sock colors', 'stocking colors', 'thong colors',
+        'head and neck', 'arms', 'shoulders', 'hands', 'torso', 'waist',
+        'genitals', 'tail', 'legs', 'ankles', 'feet', 'full body', 'lingerie',
+        'sleepwear', 'chinese clothing', 'egyptian clothing', 'greek clothing',
+        'japanese clothing', 'korean clothing', 'uniforms', 'miscellaneous',
+    ],
+    'outfits': ['outfits', 'traits', 'colors', 'uniforms', 'costumes'],
+    'piercing': ['head piercings', 'genital and related piercings',
+                 'furry piercings', 'miscellaneous piercings'],
+    'fashion': ['cultural'],
+}
+# From the mixed 'miscellaneous' section take only garment descriptions.
+E621_CLOTHING_MISC = re.compile(
+    r'^(baggy|denim|camo|checkered|criss-cross|plaid|spotted|striped|pattern|'
+    r'office|leaf)_')
+E621_EXTRA_CLOTHING = {
+    'topwear', 'bottomwear', 'footwear', 'handwear', 'headwear', 'legwear',
+    'armwear', 'swimwear', 'neckwear', 'eyewear', 'accessory',
+    'hair_accessory', 'tail_accessory', 'piercing', 'ear_ring', 'wraps',
+    'costume', 'uniform',
+}
 E621_NEVER_STRIP = {
     'body', 'fur', 'scales', 'feathers', 'skin', 'hair', 'head', 'eyes',
     'ears', 'nose', 'mouth', 'lips', 'tongue', 'teeth', 'torso', 'belly',
@@ -270,11 +303,19 @@ def build_e621():
                 if heading in SKIPPED:
                     continue
                 if wanted is ALL or heading in wanted:
+                    if group == 'clothes' and heading == 'miscellaneous':
+                        tags = [t for t in tags if E621_CLOTHING_MISC.match(t)]
                     found.update(tags)
             if wanted is not ALL:
                 for missing in sorted(set(wanted) - seen):
                     print(f'warning: e621 {group}: no section {missing!r}', file=sys.stderr)
         return found
+
+    bodies.update({
+        group: fetch_json(E621_WIKI_URL.format(quote(f'tag_group:{group}')),
+                          E621_USER_AGENT)['body']
+        for group in E621_CLOTHING_GROUPS if group not in bodies
+    })
 
     keep = (pick(E621_KEEP_GROUPS) - E621_EXTRA_TRAITS) | E621_NEVER_STRIP
     traits = pick(E621_TRAIT_GROUPS) | E621_EXTRA_TRAITS
@@ -283,14 +324,24 @@ def build_e621():
         print('e621 traits kept because a keep group lists them: '
               + ', '.join(overlap), file=sys.stderr)
 
+    clothing = pick(E621_CLOTHING_GROUPS) | E621_EXTRA_CLOTHING
+    for label, other in (('e621 keep', keep), ('e621 traits', traits)):
+        overlap = sorted(clothing & other)
+        if overlap:
+            print(f'e621 clothing left out because {label} lists them: '
+                  + ', '.join(overlap), file=sys.stderr)
+
     data = json.loads(OUTPUT.read_text(encoding='utf-8'))
     data['e621_source'] = 'https://e621.net/wiki_pages/tag_groups'
+    data['e621_clothing'] = sorted(
+        t for t in clothing - keep - traits
+        if not is_action(t) and not t.startswith('raised_'))
     data['e621_traits'] = sorted(t for t in traits - keep if not is_action(t))
     data['e621_keep'] = sorted(keep)
     OUTPUT.write_text(json.dumps(data, indent=1, ensure_ascii=False) + '\n',
                       encoding='utf-8')
     print(f"wrote e621 lists to {OUTPUT}: {len(data['e621_traits'])} trait, "
-          f"{len(data['e621_keep'])} keep tags")
+          f"{len(data['e621_keep'])} keep, {len(data['e621_clothing'])} clothing tags")
 
 
 def fetch_json(url, user_agent='ranbooru-tag-group-builder'):
