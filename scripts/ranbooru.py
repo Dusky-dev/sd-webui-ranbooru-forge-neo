@@ -3,13 +3,14 @@ import html
 import re
 import random
 import requests
+import copy
+import dataclasses
 from urllib.parse import quote_plus
 import modules.scripts as scripts
 import gradio as gr
 import os
 from PIL import Image
 import numpy as np
-import importlib
 import requests_cache
 import json
 import tempfile
@@ -23,18 +24,13 @@ from modules.processing import (
 )
 
 from modules import shared
-from modules import deepbooru
 from modules.ui_components import InputAccordion
 
 extension_root = scripts.basedir()
 
 user_data_dir = os.path.join(extension_root, 'user')
-user_search_dir = os.path.join(user_data_dir, 'search')
-user_remove_dir = os.path.join(user_data_dir, 'remove')
 user_credentials_dir = os.path.join(user_data_dir, 'credentials')
 
-os.makedirs(user_search_dir, exist_ok=True)
-os.makedirs(user_remove_dir, exist_ok=True)
 os.makedirs(user_credentials_dir, exist_ok=True)
 
 # Initialize credentials manager
@@ -121,7 +117,7 @@ class CredentialsManager:
 
 credentials_manager = CredentialsManager(extension_root)
 
-# Persist user-facing settings only when generating with Ranbooru or LoRAnado enabled.
+# Persist user-facing settings only when generating with Ranbooru enabled.
 # Gelbooru API credentials are managed separately via the opt-in credentials manager.
 RANBOORU_STATE_FILE = os.path.join(user_data_dir, 'last_settings.json')
 RANBOORU_STATE_LOCK = threading.RLock()
@@ -142,31 +138,12 @@ RANBOORU_STATE_FIELDS = (
     'change_color',
     'shuffle_tags',
     'post_id',
-    'mix_prompt',
-    'mix_amount',
-    'chaos_mode',
-    'negative_mode',
-    'chaos_amount',
     'limit_tags',
     'max_tags',
     'sorting_order',
     'mature_rating',
-    'lora_folder',
-    'lora_amount',
-    'lora_min',
-    'lora_max',
-    'lora_enabled',
-    'lora_custom_weights',
-    'lora_lock_prev',
     'use_ip',
-    'use_search_txt',
-    'use_remove_txt',
-    'choose_search_txt',
-    'choose_remove_txt',
     'crop_center',
-    'use_deepbooru',
-    'type_deepbooru',
-    'use_same_seed',
     'use_cache',
     'only_poses',
     'strip_clothing',
@@ -235,7 +212,6 @@ def save_ranbooru_settings(is_img2img, generation_values):
                     os.unlink(temp_path)
                 except OSError:
                     pass
-
 
 
 # Most-recently-used booru order shared by txt2img and img2img.
@@ -353,25 +329,6 @@ def clear_ranbooru_progress_after_postprocess(callback):
             clear_ranbooru_progress()
     return wrapped
 
-
-
-if not os.path.isfile(
-    os.path.join(user_search_dir, 'tags_search.txt')
-):
-    with open(
-        os.path.join(user_search_dir, 'tags_search.txt'),
-        'w'
-    ):
-        pass
-
-if not os.path.isfile(
-    os.path.join(user_remove_dir, 'tags_remove.txt')
-):
-    with open(
-        os.path.join(user_remove_dir, 'tags_remove.txt'),
-        'w'
-    ):
-        pass
 
 COLORED_BG = [
     'black_background',
@@ -597,6 +554,37 @@ def _normalize_pose_tag(tag):
     return '_'.join(tag.split())
 
 
+def parse_tag_list(text):
+    """Split a comma- or newline-separated tag list; trim and drop empties."""
+    return [tag.strip() for tag in re.split(r'[,\n]', str(text or '')) if tag.strip()]
+
+
+def remove_listed_tags(tags, bad_tags):
+    """Drop tags named in bad_tags. `*` makes an entry match any tag that
+    contains the rest of it (`*hair`). Spaces/underscores and case are
+    ignored on both sides."""
+    exact = set()
+    partial = []
+    for bad_tag in bad_tags:
+        norm = _normalize_pose_tag(str(bad_tag))
+        if '*' in norm:
+            norm = norm.replace('*', '').strip('_')
+            if norm:
+                partial.append(norm)
+        elif norm:
+            exact.add(norm)
+
+    kept = []
+    for tag in tags:
+        norm = _normalize_pose_tag(tag)
+        if not norm or norm in exact:
+            continue
+        if any(part in norm for part in partial):
+            continue
+        kept.append(tag)
+    return kept
+
+
 def _matches_structure(words, nouns, modifiers):
     """True when the tag is a noun preceded only by (at least one) modifier."""
     for size in (2, 1):
@@ -750,6 +738,94 @@ RATINGS = {
     "xbooru": RATING_TYPES['full'],
     "gelbooru": RATING_TYPES['single']
 }
+
+
+# Generation settings copied from the txt2img run into Ranbooru's img2img pass.
+IMG2IMG_COPIED_SETTINGS = (
+    'prompt', 'negative_prompt', 'styles', 'seed', 'subseed',
+    'subseed_strength', 'seed_resize_from_h', 'seed_resize_from_w',
+    'sampler_name', 'scheduler', 'batch_size', 'n_iter', 'cfg_scale',
+    'distilled_cfg_scale', 'restore_faces', 'tiling', 'override_settings',
+    'override_settings_restore_afterwards',
+)
+
+
+def img2img_settings_from(p, img2img_class):
+    """Settings of p that img2img_class accepts as constructor arguments."""
+    accepted = None
+    if dataclasses.is_dataclass(img2img_class):
+        accepted = {f.name for f in dataclasses.fields(img2img_class) if f.init}
+    return {
+        name: getattr(p, name)
+        for name in IMG2IMG_COPIED_SETTINGS
+        if hasattr(p, name) and (accepted is None or name in accepted)
+    }
+
+
+def source_infotext(infotexts, first_image_index, num):
+    """Infotext of the num-th generated image (a grid, if any, comes first)."""
+    if not infotexts:
+        return ''
+    index = (first_image_index or 0) + num
+    return infotexts[min(index, len(infotexts) - 1)]
+
+
+def send_image_to_controlnet(p, image, weight):
+    """Put a booru image into the first unit of Forge Neo's built-in ControlNet.
+
+    Neo's ControlNet reads its units from p.script_args when it runs
+    process(), after every before_process hook, so the first unit is replaced
+    there. The user picks the model/preprocessor in ControlNet Unit 1; this
+    enables the unit and supplies the image and weight.
+    """
+    runner = getattr(p, 'scripts', None)
+    scripts_list = getattr(runner, 'alwayson_scripts', None) or []
+    controlnet = next(
+        (script for script in scripts_list
+         if str(script.title()).strip().lower() == 'controlnet'),
+        None
+    )
+    if controlnet is None:
+        raise RuntimeError(
+            "[Ranbooru] Send to ControlNet needs Forge Neo's built-in "
+            "ControlNet, which was not found."
+        )
+
+    args = list(p.script_args or ())
+    start, end = controlnet.args_from, controlnet.args_to
+    if start is None or end is None or end <= start or len(args) <= start:
+        raise RuntimeError(
+            '[Ranbooru] Send to ControlNet: no ControlNet unit was found in '
+            'the generation arguments.'
+        )
+
+    pixels = {'image': np.asarray(image.convert('RGB')), 'mask': None}
+    unit = args[start]
+    if isinstance(unit, dict):
+        unit = dict(unit)
+        unit.update(enabled=True, weight=weight, image=pixels,
+                    use_preview_as_input=False)
+        model = unit.get('model', 'None')
+    else:
+        changes = dict(enabled=True, weight=weight, image=pixels,
+                       use_preview_as_input=False)
+        if dataclasses.is_dataclass(unit):
+            unit = dataclasses.replace(unit, **changes)
+        else:
+            unit = copy.copy(unit)
+            for key, value in changes.items():
+                setattr(unit, key, value)
+        model = getattr(unit, 'model', 'None')
+
+    if str(model or 'None') == 'None':
+        print(
+            '[Ranbooru] Send to ControlNet: pick a model in ControlNet '
+            'Unit 1, otherwise the image is ignored.'
+        )
+
+    args[start] = unit
+    p.script_args = type(p.script_args)(args) if isinstance(
+        p.script_args, (list, tuple)) else tuple(args)
 
 
 def get_available_ratings(booru):
@@ -1669,7 +1745,7 @@ class e621(Booru):
         if isinstance(flags, dict) and flags.get('deleted'):
             return 'the post was deleted'
         # Anonymous requests get no image URL for some posts; skip those so
-        # img2img and Deepbooru never fall back to an unrelated picture.
+        # img2img never falls back to an unrelated picture.
         if cls._file_url(post) is None:
             return 'e621 gives no image URL for it without logging in'
         tags = post.get('tags')
@@ -1816,26 +1892,6 @@ class e621(Booru):
         return {t: cache.get(t) for t in set(tags)}
 
 
-def generate_chaos(pos_tags, neg_tags, chaos_amount):
-    """Generates chaos in the prompt by adding random tags from the prompt to the positive and negative prompts"""
-
-    chaos_list = [tag for tag in pos_tags.split(',') + neg_tags.split(',') if tag.strip() != '']
-    chaos_list = list(set(chaos_list))
-    random.shuffle(chaos_list)
-
-    len_list = round(len(chaos_list) * chaos_amount)
-
-    pos_list = chaos_list[len_list:]
-    neg_list = chaos_list[:len_list]
-
-    random.shuffle(neg_list)
-
-    pos_prompt = ', '.join(pos_list)
-    neg_prompt = ', '.join(neg_list)
-
-    return pos_prompt, neg_prompt
-
-
 def resize_image(img, width, height, cropping=True):
     """
     Resize image to specified width and height
@@ -1911,44 +1967,6 @@ def resize_image(img, width, height, cropping=True):
         img = img.resize((width, height))
 
     return img
-def modify_prompt(prompt, tagged_prompt, type_deepbooru):
-    """
-    Modifies the prompt based on the type_deepbooru selected
-
-    Args:
-        prompt (str): the prompt
-        tagged_prompt (str): the prompt tagged by deepbooru
-        type_deepbooru (str): the type of modification
-
-    Returns:
-        str: the modified prompt
-    """
-
-    if type_deepbooru == 'Add Before':
-        return tagged_prompt + ',' + prompt
-
-    elif type_deepbooru == 'Add After':
-        return prompt + ',' + tagged_prompt
-
-    elif type_deepbooru == 'Replace':
-        return tagged_prompt
-
-    return prompt
-
-
-def remove_repeated_tags(prompt):
-    """Removes repeated tags while keeping order"""
-
-    prompt = prompt.split(',')
-
-    new_prompt = []
-
-    for tag in prompt:
-        tag = tag.strip()
-        if tag and tag not in new_prompt:
-            new_prompt.append(tag)
-
-    return ', '.join(new_prompt)
 
 
 def limit_prompt_tags(prompt, limit_tags, mode):
@@ -1978,32 +1996,11 @@ def normalize_prompt(prompt):
 
 class Script(scripts.Script):
 
-    previous_loras = ''
     last_img = []
     real_steps = 0
     version = "1.2"
     original_prompt = ''
 
-    def get_files(self, path):
-        files = []
-
-        for file in os.listdir(path):
-            if file.endswith('.txt'):
-                files.append(file)
-
-        return files
-
-    def hide_object(self, obj, booru):
-        print(f'hide_object: {obj}, {booru.value}')
-
-        if (
-            booru.value == 'konachan'
-            or booru.value == 'yande.re'
-        ):
-            obj.interactive = False
-
-        else:
-            obj.interactive = True
 
     def title(self):
         return "Ranbooru"
@@ -2070,16 +2067,6 @@ class Script(scripts.Script):
             credentials_manager.clear_booru_credentials(booru)
         return self.booru_credential_updates(booru, cleared=True)
 
-
-    def refresh_ser(self):
-        return gr.update(
-            choices=self.get_files(user_search_dir)
-        )
-
-    def refresh_rem(self):
-        return gr.update(
-            choices=self.get_files(user_remove_dir)
-        )
 
     def ui(self, is_img2img):
         self._ranbooru_is_img2img = is_img2img
@@ -2373,181 +2360,10 @@ class Script(scripts.Script):
                         value=saved_value('crop_center', False)
                     )
 
-                    use_deepbooru = gr.Checkbox(
-                        label="Use Deepbooru",
-                        value=saved_value('use_deepbooru', False)
-                    )
-
-                    type_deepbooru = gr.Radio(
-                        [
-                            "Add Before",
-                            "Add After",
-                            "Replace"
-                        ],
-
-                        label="Deepbooru Tags Position",
-                        value=saved_choice('type_deepbooru', 'Add Before', ['Add Before', 'Add After', 'Replace'])
-                    )
-
-            with gr.Group():
-
-                with gr.Accordion("File", open=False):
-
-                    use_search_txt = gr.Checkbox(
-                        label="Use tags_search.txt",
-                        value=saved_value('use_search_txt', False)
-                    )
-
-                    choose_search_txt = gr.Dropdown(
-                        self.get_files(user_search_dir),
-                        label="Choose tags_search.txt",
-                        value=saved_choice('choose_search_txt', "", self.get_files(user_search_dir))
-                    )
-
-                    search_refresh_btn = gr.Button(
-                        "Refresh"
-                    )
-
-                    use_remove_txt = gr.Checkbox(
-                        label="Use tags_remove.txt",
-                        value=saved_value('use_remove_txt', False)
-                    )
-
-                    choose_remove_txt = gr.Dropdown(
-                        self.get_files(user_remove_dir),
-                        label="Choose tags_remove.txt",
-                        value=saved_choice('choose_remove_txt', "", self.get_files(user_remove_dir))
-                    )
-
-                    remove_refresh_btn = gr.Button(
-                        "Refresh"
-                    )
-
-            with gr.Group():
-
-                with gr.Accordion("Extra", open=False):
-
-                    with gr.Box():
-
-                        mix_prompt = gr.Checkbox(
-                            label="Mix prompts",
-                            value=saved_value('mix_prompt', False)
-                        )
-
-                        mix_amount = gr.Slider(
-                            value=saved_slider('mix_amount', 2, 2, 10),
-                            label="Mix amount",
-                            minimum=2,
-                            maximum=10,
-                            step=1
-                        )
-
-                    with gr.Box():
-
-                        chaos_mode = gr.Radio(
-                            [
-                                "None",
-                                "Chaos",
-                                "Less Chaos"
-                            ],
-
-                            label="Chaos Mode",
-                            value=saved_choice('chaos_mode', 'None', ['None', 'Chaos', 'Less Chaos'])
-                        )
-
-                        chaos_amount = gr.Slider(
-                            value=saved_slider('chaos_amount', 0.5, 0.1, 1),
-                            label="Chaos Amount %",
-                            minimum=0.1,
-                            maximum=1,
-                            step=0.05
-                        )
-
-                    with gr.Box():
-
-                        negative_mode = gr.Radio(
-                            [
-                                "None",
-                                "Negative"
-                            ],
-
-                            label="Negative Mode",
-                            value=saved_choice('negative_mode', 'None', ['None', 'Negative'])
-                        )
-
-                    use_same_seed = gr.Checkbox(
-                        label="Use same seed for all pictures",
-                        value=saved_value('use_same_seed', False)
-                    )
-
-                    with gr.Box():
-
-                        use_cache = gr.Checkbox(
-                            label="Use cache",
-                            value=saved_value('use_cache', True)
-                        )
-
-            with InputAccordion(
-                saved_value('lora_enabled', False),
-                label="LoRAnado",
-                elem_id=self.elem_id("lo_enable")
-            ) as lora_enabled:
-
-                with gr.Box():
-
-                    lora_lock_prev = gr.Checkbox(
-                        label="Lock previous LoRAs",
-                        value=saved_value('lora_lock_prev', False)
-                    )
-
-                    lora_folder = gr.Textbox(
-                        value=saved_value('lora_folder', ""),
-                        lines=1,
-                        label="LoRAs Subfolder"
-                    )
-
-                    lora_amount = gr.Slider(
-                        value=saved_slider('lora_amount', 1, 1, 10),
-                        label="LoRAs Amount",
-                        minimum=1,
-                        maximum=10,
-                        step=1
-                    )
-
-                with gr.Box():
-
-                    lora_min = gr.Slider(
-                        value=saved_slider('lora_min', -1.0, -1, 1),
-                        label="Min LoRAs Weight",
-                        minimum=-1.0,
-                        maximum=1,
-                        step=0.1
-                    )
-
-                    lora_max = gr.Slider(
-                        value=saved_slider('lora_max', 1.0, -1, 1),
-                        label="Max LoRAs Weight",
-                        minimum=-1.0,
-                        maximum=1.0,
-                        step=0.1
-                    )
-
-                    lora_custom_weights = gr.Textbox(
-                        value=saved_value('lora_custom_weights', ""),
-                        lines=1,
-                        label="LoRAs Custom Weights"
-                    )
-
-            search_refresh_btn.click(
-                fn=self.refresh_ser,
-                inputs=[],
-                outputs=[choose_search_txt]
-            )
-
-            remove_refresh_btn.click(
-                fn=self.refresh_rem,
-                inputs=[],
-                outputs=[choose_remove_txt]
+            use_cache = gr.Checkbox(
+                label="Use cache",
+                info="Reuse booru API replies for an hour (faster, but repeats the same pages)",
+                value=saved_value('use_cache', True)
             )
 
             credential_outputs = [
@@ -2593,33 +2409,12 @@ class Script(scripts.Script):
             change_color,
             shuffle_tags,
             post_id,
-            mix_prompt,
-            mix_amount,
-            chaos_mode,
-            negative_mode,
-            chaos_amount,
             limit_tags,
             max_tags,
             sorting_order,
             mature_rating,
-            lora_folder,
-            lora_amount,
-            lora_min,
-            lora_max,
-            lora_enabled,
-            lora_custom_weights,
-            lora_lock_prev,
             use_ip,
-            use_search_txt,
-            use_remove_txt,
-            choose_search_txt,
-            choose_remove_txt,
-            search_refresh_btn,
-            remove_refresh_btn,
             crop_center,
-            use_deepbooru,
-            type_deepbooru,
-            use_same_seed,
             use_cache,
             only_poses,
             strip_clothing,
@@ -2655,10 +2450,7 @@ class Script(scripts.Script):
         }
         state_names = tuple(state_controls)
         load_outputs = [state_controls[name] for name in state_names]
-        load_outputs.extend([
-            enabled.accordion,
-            lora_enabled.accordion,
-        ])
+        load_outputs.append(enabled.accordion)
         load_outputs.extend(credential_outputs)
 
         def restore_browser_page():
@@ -2682,8 +2474,7 @@ class Script(scripts.Script):
             for name in state_names:
                 widget = state_controls[name]
                 if name not in state and name not in (
-                    'booru', 'mature_rating', 'fringe_benefits',
-                    'choose_search_txt', 'choose_remove_txt'
+                    'booru', 'mature_rating', 'fringe_benefits'
                 ):
                     results.append(gr.update())
                     continue
@@ -2697,15 +2488,6 @@ class Script(scripts.Script):
                 if name == 'mature_rating':
                     value = value if value in rating_choices else 'All'
                     results.append(gr.update(choices=rating_choices, value=value))
-                    continue
-
-                if name in ('choose_search_txt', 'choose_remove_txt'):
-                    path = user_search_dir if name == 'choose_search_txt' else user_remove_dir
-                    choices = self.get_files(path)
-                    results.append(gr.update(
-                        choices=choices,
-                        value=value if value in choices else None,
-                    ))
                     continue
 
                 if isinstance(widget, gr.Checkbox):
@@ -2737,13 +2519,7 @@ class Script(scripts.Script):
             enabled_on = state.get('enabled', enabled.value)
             if type(enabled_on) is not bool:
                 enabled_on = bool(enabled.value)
-            loranado_on = state.get('lora_enabled', lora_enabled.value)
-            if type(loranado_on) is not bool:
-                loranado_on = bool(lora_enabled.value)
-            results.extend([
-                gr.update(open=enabled_on),
-                gr.update(open=loranado_on),
-            ])
+            results.append(gr.update(open=enabled_on))
             # The credentials panel follows the restored booru.
             results.extend(self.booru_credential_updates(current_booru))
             print(f'[Ranbooru] Restored {len(state)} settings for '
@@ -2780,77 +2556,6 @@ class Script(scripts.Script):
         else:
             return [768, 768]
 
-    def loranado(
-        self,
-        lora_enabled,
-        lora_folder,
-        lora_amount,
-        lora_min,
-        lora_max,
-        lora_custom_weights,
-        p,
-        lora_lock_prev
-    ):
-
-        lora_prompt = ''
-
-        if lora_enabled:
-
-            if lora_lock_prev:
-                lora_prompt = self.previous_loras
-
-            else:
-                loras = []
-
-                loras = os.listdir(f'{lora_folder}')
-
-                # get only .safetensors files
-                loras = [
-                    lora.replace('.safetensors', '')
-                    for lora in loras
-                    if lora.endswith('.safetensors')
-                ]
-
-                for l in range(0, lora_amount):
-
-                    lora_weight = 0
-
-                    if lora_custom_weights != '':
-                        lora_weight = float(
-                            lora_custom_weights.split(',')[l]
-                        )
-
-                    while lora_weight == 0:
-                        lora_weight = round(
-                            random.uniform(
-                                lora_min,
-                                lora_max
-                            ),
-                            1
-                        )
-
-                    lora_prompt += (
-                        f'<lora:{random.choice(loras)}'
-                        f':{lora_weight}>'
-                    )
-
-                self.previous_loras = lora_prompt
-
-            if lora_prompt:
-
-                if isinstance(p.prompt, list):
-
-                    for num, pr in enumerate(p.prompt):
-                        p.prompt[num] = (
-                            f'{lora_prompt} {pr}'
-                        )
-
-                else:
-                    p.prompt = (
-                        f'{lora_prompt} {p.prompt}'
-                    )
-
-        return p
     @clear_ranbooru_progress_on_error
     def before_process(
         self,
@@ -2871,33 +2576,12 @@ class Script(scripts.Script):
         change_color,
         shuffle_tags,
         post_id,
-        mix_prompt,
-        mix_amount,
-        chaos_mode,
-        negative_mode,
-        chaos_amount,
         limit_tags,
         max_tags,
         sorting_order,
         mature_rating,
-        lora_folder,
-        lora_amount,
-        lora_min,
-        lora_max,
-        lora_enabled,
-        lora_custom_weights,
-        lora_lock_prev,
         use_ip,
-        use_search_txt,
-        use_remove_txt,
-        choose_search_txt,
-        choose_remove_txt,
-        search_refresh_btn,
-        remove_refresh_btn,
         crop_center,
-        use_deepbooru,
-        type_deepbooru,
-        use_same_seed,
         use_cache,
         only_poses,
         strip_clothing,
@@ -2911,7 +2595,7 @@ class Script(scripts.Script):
 
         # Snapshot the actual submitted values, not partially edited browser state.
         # Saving before API queries also preserves inputs when the query fails.
-        if enabled or lora_enabled:
+        if enabled:
             save_ranbooru_settings(
                 getattr(self, '_ranbooru_is_img2img', isinstance(p, StableDiffusionProcessingImg2Img)),
                 locals()
@@ -3046,24 +2730,7 @@ class Script(scripts.Script):
                     'korean_commentary'
                 ]
 
-            if ',' in remove_tags:
-                bad_tags.extend(
-                    remove_tags.split(',')
-                )
-
-            else:
-                bad_tags.append(remove_tags)
-
-            if use_remove_txt:
-                bad_tags.extend(
-                    open(
-                        os.path.join(
-                            user_remove_dir,
-                            choose_remove_txt
-                        ),
-                        'r'
-                    ).read().split(',')
-                )
+            bad_tags.extend(parse_tag_list(remove_tags))
 
             # Manage Backgrounds
             background_options = {
@@ -3131,46 +2798,6 @@ class Script(scripts.Script):
                         if p.prompt
                         else color_option
                     )
-
-            if use_search_txt:
-
-                search_tags = open(
-                    os.path.join(
-                        user_search_dir,
-                        choose_search_txt
-                    ),
-                    'r'
-                ).read()
-
-                search_tags_r = search_tags.replace(
-                    " ",
-                    ""
-                )
-
-                split_tags = (
-                    search_tags_r.splitlines()
-                )
-
-                filtered_tags = [
-                    line
-                    for line in split_tags
-                    if line.strip()
-                ]
-
-                rand_selected = random.randint(
-                    0,
-                    len(filtered_tags) - 1
-                )
-
-                selected_tags = (
-                    filtered_tags[rand_selected]
-                )
-
-                tags = (
-                    f'{tags},{selected_tags}'
-                    if tags
-                    else selected_tags
-                )
 
             if booru == 'danbooru':
                 # Don't spend a scarce tag slot on -animated: the Danbooru
@@ -3338,63 +2965,7 @@ class Script(scripts.Script):
 
                 else:
 
-                    if mix_prompt:
-
-                        temp_tags = []
-                        max_tags = 0
-
-                        for _ in range(0, mix_amount):
-
-                            if not post_id:
-                                random_mix_number = 0
-
-                                if not post_id:
-                                    random_mix_number = (
-                                        self.random_number(
-                                            sorting_order,
-                                            1,
-                                            len(data['post'])
-                                        )[0]
-                                    )
-
-                                temp_tags.extend(
-                                    data['post'][
-                                        random_mix_number
-                                    ]['tags'].split(' ')
-                                )
-
-                                max_tags = max(
-                                    max_tags,
-
-                                    len(
-                                        data['post'][
-                                            random_mix_number
-                                        ]['tags'].split(' ')
-                                    )
-                                )
-
-                        # distinct temp_tags
-                        temp_tags = list(set(temp_tags))
-
-                        # Copy to avoid changing the source post when mixing.
-                        random_post = dict(data['post'][
-                            random_number
-                        ])
-
-                        max_tags = min(
-                            max(len(temp_tags), 20),
-                            max_tags
-                        )
-
-                        random_post['tags'] = ' '.join(
-                            random.sample(
-                                temp_tags,
-                                max_tags
-                            )
-                        )
-
-                    else:
-                        random_post = data['post'][random_number]
+                    random_post = data['post'][random_number]
 
                 clean_tags = (
                     random_post['tags']
@@ -3431,7 +3002,7 @@ class Script(scripts.Script):
                     print(random_post)
 
             # Get Images
-            if use_img2img or use_deepbooru:
+            if use_img2img:
 
                 image_urls = (
                     [random_post['file_url']]
@@ -3462,6 +3033,13 @@ class Script(scripts.Script):
                             f"{img}: {e}"
                         )
 
+                if not last_img:
+                    raise RuntimeError(
+                        f'[Ranbooru] Use img2img: none of the {len(image_urls)} '
+                        f'booru image(s) could be downloaded (see the console '
+                        f'for each error). Try again or turn off Use img2img.'
+                    )
+
             # e621 posts carry no categories; look up the prompt's tags.
             e621_dropped_tags = set()
             if isinstance(api_url, e621):
@@ -3486,24 +3064,10 @@ class Script(scripts.Script):
             # Cleaning Tags
             for prompt in prompts:
 
-                prompt_tags = [
-                    tag
-                    for tag in html.unescape(
-                        prompt
-                    ).split(',')
-                    if tag.strip() not in bad_tags
-                ]
-
-                for bad_tag in bad_tags:
-
-                    if '*' in bad_tag:
-
-                        prompt_tags = [
-                            tag
-                            for tag in prompt_tags
-                            if bad_tag.replace('*', '')
-                            not in tag
-                        ]
+                prompt_tags = remove_listed_tags(
+                    html.unescape(prompt).split(','),
+                    bad_tags
+                )
 
                 if e621_dropped_tags:
                     prompt_tags = [
@@ -3543,98 +3107,17 @@ class Script(scripts.Script):
                     else prompts[-1]
                 )
 
-                if chaos_mode in [
-                    'Chaos',
-                    'Less Chaos'
-                ]:
-
-                    negative_prompt = ''
-
-                    if chaos_mode == 'Less Chaos':
-                        negative_prompt = (
-                            p.negative_prompt
-                        )
-
-                    p.prompt, negative_prompt = (
-                        generate_chaos(
-                            p.prompt,
-                            negative_prompt,
-                            chaos_amount
-                        )
-                    )
-
-                    p.negative_prompt = (
-                        f"{p.negative_prompt},"
-                        f"{negative_prompt}"
-                        if p.negative_prompt
-                        else negative_prompt
-                    )
-
             else:
 
                 print('Processing Multiple Prompts')
 
-                negative_prompts = []
-                new_prompts = []
-
-                if chaos_mode == 'Chaos':
-
-                    for prompt in prompts:
-
-                        tmp_prompt, negative_prompt = (
-                            generate_chaos(
-                                prompt,
-                                p.negative_prompt,
-                                chaos_amount
-                            )
-                        )
-
-                        new_prompts.append(tmp_prompt)
-                        negative_prompts.append(
-                            negative_prompt
-                        )
-
-                    prompts = new_prompts
-                    p.negative_prompt = negative_prompts
-
-                elif chaos_mode == 'Less Chaos':
-
-                    for prompt in prompts:
-
-                        tmp_prompt, negative_prompt = (
-                            generate_chaos(
-                                prompt,
-                                '',
-                                chaos_amount
-                            )
-                        )
-
-                        new_prompts.append(tmp_prompt)
-
-                        negative_prompts.append(
-                            negative_prompt
-                        )
-
-                    prompts = new_prompts
-
-                    p.negative_prompt = [
-                        p.negative_prompt
-                        + ','
-                        + negative_prompt
-
-                        for negative_prompt
-                        in negative_prompts
-                    ]
-
-                else:
-
-                    p.negative_prompt = [
-                        p.negative_prompt
-                        for _ in range(
-                            0,
-                            p.batch_size * p.n_iter
-                        )
-                    ]
+                p.negative_prompt = [
+                    p.negative_prompt
+                    for _ in range(
+                        0,
+                        p.batch_size * p.n_iter
+                    )
+                ]
 
                 p.prompt = (
                     prompts
@@ -3659,117 +3142,6 @@ class Script(scripts.Script):
                             p.batch_size * p.n_iter
                         )
                     ]
-            if negative_mode == 'Negative':
-
-                # remove tags from p.prompt
-                # using tags from the original prompt
-                orig_list = self.original_prompt.split(',')
-
-                if isinstance(p.prompt, list):
-
-                    new_positive_prompts = []
-                    new_negative_prompts = []
-
-                    for pr, npp in zip(
-                        p.prompt,
-                        p.negative_prompt
-                    ):
-
-                        clean_prompt = pr.split(',')
-
-                        clean_prompt = [
-                            tag
-                            for tag in clean_prompt
-                            if tag not in orig_list
-                        ]
-
-                        clean_prompt = ','.join(
-                            clean_prompt
-                        )
-
-                        new_positive_prompts.append(
-                            self.original_prompt
-                        )
-
-                        new_negative_prompts.append(
-                            f'{npp},{clean_prompt}'
-                        )
-
-                    p.prompt = new_positive_prompts
-                    p.negative_prompt = (
-                        new_negative_prompts
-                    )
-
-                else:
-
-                    clean_prompt = p.prompt.split(',')
-
-                    clean_prompt = [
-                        tag
-                        for tag in clean_prompt
-                        if tag not in orig_list
-                    ]
-
-                    clean_prompt = ', '.join(tag.strip() for tag in clean_prompt if tag.strip())
-
-                    p.negative_prompt = (
-                        f'{p.negative_prompt},'
-                        f'{clean_prompt}'
-                    )
-
-                    p.prompt = self.original_prompt
-
-            if (
-                negative_mode == 'Negative'
-                or chaos_mode in [
-                    'Chaos',
-                    'Less Chaos'
-                ]
-            ):
-
-                # NEGATIVE PROMPT FIX
-                neg_prompt_tokens = []
-
-                for pr in p.negative_prompt:
-
-                    neg_prompt_tokens.append(
-                        model_hijack
-                        .get_prompt_lengths(pr)[1]
-                    )
-
-                if len(set(neg_prompt_tokens)) != 1:
-
-                    print('Padding negative prompts')
-
-                    max_tokens = max(
-                        neg_prompt_tokens
-                    )
-
-                    for num, neg in enumerate(
-                        neg_prompt_tokens
-                    ):
-
-                        while neg < max_tokens:
-
-                            p.negative_prompt[num] += (
-                                random.choice(
-                                    p.negative_prompt[
-                                        num
-                                    ].split(',')
-                                )
-                            )
-
-                            # p.negative_prompt[num] += '_'
-
-                            neg = (
-                                model_hijack
-                                .get_prompt_lengths(
-                                    p.negative_prompt[
-                                        num
-                                    ]
-                                )[1]
-                            )
-
             if limit_tags < 1:
 
                 if isinstance(p.prompt, list):
@@ -3823,74 +3195,6 @@ class Script(scripts.Script):
             elif isinstance(p.negative_prompt, str):
                 p.negative_prompt = normalize_prompt(p.negative_prompt)
 
-            if use_same_seed:
-
-                p.seed = (
-                    random.randint(
-                        0,
-                        2 ** 32 - 1
-                    )
-                    if p.seed == -1
-                    else p.seed
-                )
-
-                p.seed = [p.seed] * p.batch_size
-
-            # LORANADO
-            p = self.loranado(
-                lora_enabled,
-                lora_folder,
-                lora_amount,
-                lora_min,
-                lora_max,
-                lora_custom_weights,
-                p,
-                lora_lock_prev
-            )
-
-            if (
-                use_deepbooru
-                and not use_img2img
-            ):
-
-                self.last_img = last_img
-
-                tagged_prompts = self.use_autotagger(
-                    'deepbooru',
-                    only_poses,
-                    strip_clothing
-                )
-
-                if isinstance(p.prompt, list):
-
-                    p.prompt = [
-                        modify_prompt(
-                            pr,
-                            tagged_prompts[num],
-                            type_deepbooru
-                        )
-
-                        for num, pr
-                        in enumerate(p.prompt)
-                    ]
-
-                    p.prompt = [
-                        remove_repeated_tags(pr)
-                        for pr in p.prompt
-                    ]
-
-                else:
-
-                    p.prompt = modify_prompt(
-                        p.prompt,
-                        tagged_prompts,
-                        type_deepbooru
-                    )
-
-                    p.prompt = remove_repeated_tags(
-                        p.prompt
-                    )
-
             if use_img2img:
 
                 if not use_ip:
@@ -3901,61 +3205,7 @@ class Script(scripts.Script):
                 self.last_img = last_img
 
                 if use_ip:
-
-                    controlNetModule = (
-                        importlib.import_module(
-                            'extensions.'
-                            'sd-webui-controlnet.'
-                            'scripts.external_code',
-                            'external_code'
-                        )
-                    )
-
-                    controlNetList = (
-                        controlNetModule
-                        .get_all_units_in_processing(p)
-                    )
-
-                    copied_network = (
-                        controlNetList[0]
-                        .__dict__
-                        .copy()
-                    )
-
-                    copied_network['enabled'] = True
-
-                    copied_network['weight'] = (
-                        denoising
-                    )
-
-                    array_img = np.array(last_img[0])
-
-                    copied_network['image']['image'] = (
-                        array_img
-                    )
-
-                    copied_networks = (
-                        [copied_network]
-                        + controlNetList[1:]
-                    )
-
-                    controlNetModule.update_cn_script_in_processing(
-                        p,
-                        copied_networks
-                    )
-
-            elif lora_enabled:
-
-                p = self.loranado(
-                    lora_enabled,
-                    lora_folder,
-                    lora_amount,
-                    lora_min,
-                    lora_max,
-                    lora_custom_weights,
-                    p,
-                    lora_lock_prev
-                )
+                    send_image_to_controlnet(p, last_img[0], denoising)
 
     @clear_ranbooru_progress_after_postprocess
     def postprocess(
@@ -3978,33 +3228,12 @@ class Script(scripts.Script):
         change_color,
         shuffle_tags,
         post_id,
-        mix_prompt,
-        mix_amount,
-        chaos_mode,
-        negative_mode,
-        chaos_amount,
         limit_tags,
         max_tags,
         sorting_order,
         mature_rating,
-        lora_folder,
-        lora_amount,
-        lora_min,
-        lora_max,
-        lora_enabled,
-        lora_custom_weights,
-        lora_lock_prev,
         use_ip,
-        use_search_txt,
-        use_remove_txt,
-        choose_search_txt,
-        choose_remove_txt,
-        search_refresh_btn,
-        remove_refresh_btn,
         crop_center,
-        use_deepbooru,
-        type_deepbooru,
-        use_same_seed,
         use_cache,
         only_poses,
         strip_clothing,
@@ -4045,108 +3274,42 @@ class Script(scripts.Script):
                     self.last_img[0]
                 )
 
-            final_prompts = p.prompt
-
-            if use_deepbooru:
-
-                tagged_prompts = self.use_autotagger(
-                    'deepbooru',
-                    only_poses,
-                    strip_clothing
-                )
-
-                if isinstance(p.prompt, list):
-
-                    final_prompts = [
-                        modify_prompt(
-                            pr,
-                            tagged_prompts[num],
-                            type_deepbooru
-                        )
-
-                        for num, pr
-                        in enumerate(p.prompt)
-                    ]
-
-                    final_prompts = [
-                        remove_repeated_tags(pr)
-                        for pr in final_prompts
-                    ]
-
-                else:
-
-                    final_prompts = modify_prompt(
-                        p.prompt,
-                        tagged_prompts,
-                        type_deepbooru
-                    )
-
-                    final_prompts = remove_repeated_tags(
-                        final_prompts
-                    )
-
-            p = StableDiffusionProcessingImg2Img(
+            # Second pass: a real img2img run on the booru images. Copy the
+            # generation settings that exist on this WebUI build (styles,
+            # variation seed, distilled CFG, clip skip and other overrides...),
+            # but not scripts, which would run Ranbooru again.
+            settings = img2img_settings_from(p, StableDiffusionProcessingImg2Img)
+            settings.update(
                 sd_model=shared.sd_model,
-
                 outpath_samples=(
                     shared.opts.outdir_samples
                     or shared.opts.outdir_img2img_samples
                 ),
-
                 outpath_grids=(
                     shared.opts.outdir_grids
                     or shared.opts.outdir_img2img_grids
                 ),
-
-                prompt=final_prompts,
-
-                negative_prompt=p.negative_prompt,
-
-                seed=p.seed,
-
-                sampler_name=p.sampler_name,
-
-                scheduler=p.scheduler,
-
-                batch_size=p.batch_size,
-
-                n_iter=p.n_iter,
-
                 steps=self.real_steps,
-
-                cfg_scale=p.cfg_scale,
-
                 width=width,
-
                 height=height,
-
                 init_images=self.last_img,
-
                 denoising_strength=denoising,
             )
+            p = StableDiffusionProcessingImg2Img(**settings)
 
             proc = process_images(p)
 
             processed.images = proc.images
             processed.infotexts = proc.infotexts
 
-            if use_last_img:
-
-                processed.images.append(
-                    self.last_img[0]
+            # Show the source booru image(s) after the results, each with the
+            # infotext of the image it produced.
+            sources = self.last_img[:1] if use_last_img else self.last_img
+            for num, img in enumerate(sources):
+                processed.images.append(img)
+                processed.infotexts.append(
+                    source_infotext(proc.infotexts, proc.index_of_first_image, num)
                 )
-
-            else:
-
-                for num, img in enumerate(
-                    self.last_img
-                ):
-
-                    processed.images.append(img)
-
-                    processed.infotexts.append(
-                        proc.infotexts[num + 1]
-                    )
 
     def random_number(self, sorting_order, size, available_count):
         """Choose valid indices from the posts actually returned by the API.
@@ -4173,73 +3336,3 @@ class Script(scripts.Script):
             return random.choices(range(count), k=size)
         return random.sample(range(count), size)
 
-    def use_autotagger(
-        self,
-        model,
-        only_poses=False,
-        strip_clothing=False
-    ):
-        """
-        Use the autotagger to tag the images
-
-        Args:
-            model (str):
-                the model to use.
-                Right now only
-                'deepbooru'
-                is supported
-
-        Returns:
-            list:
-                the tagged prompts
-        """
-
-        if model == 'deepbooru':
-
-            if isinstance(
-                self.original_prompt,
-                str
-            ):
-
-                orig_prompt = [
-                    self.original_prompt
-                ]
-
-            else:
-                orig_prompt = self.original_prompt
-
-            deepbooru.model.start()
-
-            final_prompts = []
-
-            for img, prompt in zip(
-                self.last_img,
-                orig_prompt
-            ):
-
-                deepbooru_tags = deepbooru.model.tag_multi(img)
-
-                # Interrogated tags bypass the booru cleaning loop.
-                if only_poses or strip_clothing:
-                    deepbooru_tags = ', '.join(
-                        tag.strip()
-                        for tag in filter_pose_tags(
-                            deepbooru_tags.split(','),
-                            strip_traits=only_poses,
-                            strip_clothing=strip_clothing,
-                            # Deepbooru emits Danbooru tag names.
-                            names=pose_name_tags,
-                            qualifiers=pose_name_qualifiers
-                        )
-                        if tag.strip()
-                    )
-
-                final_prompts.append(
-                    prompt
-                    + ','
-                    + deepbooru_tags
-                )
-
-            deepbooru.model.stop()
-
-            return final_prompts
