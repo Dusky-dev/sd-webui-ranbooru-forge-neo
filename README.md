@@ -25,7 +25,7 @@ Gelbooru (since June 2025) and Rule34 require an API key and user ID; e621 works
 - **Rule34:** API key and user ID from **My Account > Options** on rule34.xxx (see [api.rule34.xxx](https://api.rule34.xxx/)). Without them, Rule34 returns no posts and Ranbooru reports that a login is needed.
 - **e621 (optional):** your username and an API key from **Account > Manage API Access**. They are sent as an HTTP login, not in the URL. About 8% of e621 posts have no image link for anonymous users (these are skipped); logging in may make some of them available.
 
-- **Max Pages**: The maximum amount of pages to get the tags from. The extension will get a random page from the booru and then get the tags from one or more random pictures from that page. Where the booru reports how many posts match, the page is picked only among pages that exist, and each site's own page limit is respected.
+- **Max Pages**: The maximum amount of pages to get the tags from. The extension will get a random page from the booru and then get the tags from one or more random pictures from that page. Where the booru reports how many posts match, the page is picked only among pages that exist, and each site's own page limit is respected. **Gelbooru** only pages about 1,000 posts deep, so for random posts it asks for `sort:random` instead (one request, drawn from the whole search) and Max Pages doesn't apply; if your tags contain their own `sort:` order, at most 10 pages are used.
 - **Post ID**: Here you can specify the ID of the post to get the tags from. If you leave it blank, the extension will get a random post (or more than one) from the random page. Supported on every booru.
 - **Tags to Search (Pre)**: This add the tags you define (this should be separated by commas e.g: 1girl,solo,short_hair) to the search query. This is useful if you want to get tags from a specific category, like "1girl" or "solo".
 - **Tags to Remove (Post)**: This remove the tags you define (this should be separated by commas e.g: 1girl,solo,short_hair) from the result query. This is useful if you want to remove tags that are too generic, like "1girl" or "solo". Spaces around entries, letter case, and spaces vs. underscores don't matter (`solo, short hair` works). You can also use * with any tag to remove every tags which contains the related word. e.g: *hair will remove every tag that contains the word "hair".
@@ -33,6 +33,7 @@ Gelbooru (since June 2025) and Rule34 require an API key and user ID; e621 works
 - **Remove Bad Tags**: This remove tags that you usually don't need (watermarks,text,censor)
 - **Shuffle Tags**: This shuffle the tags before adding them to the text.
 - **Only poses**: Removes appearance tags (hair, eyes, skin, body traits) plus character, copyright and artist names, keeping pose, expression and composition tags. **Strip clothing & accessories** also removes outfits and accessories. See [usage.md](usage.md#only-poses) for what each booru supports.
+- **Skip tags already in prompt** (off by default): Leaves out fetched tags you already typed. Weights and attention brackets are ignored, so `(blue hair:1.2)` in your prompt skips a fetched `blue_hair`; LoRA tags are ignored.
 - **Convert** "\_" to Spaces": This convert \_ to spaces in the tags.
 - **Use the same prompt for all images**: This use the same prompt for all the generated images in the same batch. If not selected, each image will have a different prompt.
 - **Fringe Benefits**: This option is available only for Gelbooru and enables all the hidden content available on the website. This is equivalent to enabling the "Display all site content" flag in the Gelbooru website settings.
@@ -41,12 +42,12 @@ Gelbooru (since June 2025) and Rule34 require an API key and user ID; e621 works
 - **Change Background**: This tries to change the background of the parsed tags by adding or removing specific tags
 - **Change Color**: This tries to change the color of the parsed tags by adding or removing specific tags
 - **Sorting Order**: This orders the result of the scraped pictures by high or low score and make it more or less likely to get a high or low score picture. This is applied AFTER the results are scraped, because you cannot use the API to search for high ranking pictures.
-- **Use img2img**: This uses not only the tags from the random image, but also the original picture to generate the final result. Ranbooru first runs a 1-step throwaway pass, then a real img2img pass on the booru image(s) with your prompt, sampler, scheduler, CFG, seed, styles and setting overrides (such as clip skip). Other extensions (ADetailer, hires fix) do not run on that second pass.
+- **Use img2img**: This uses not only the tags from the random image, but also the original picture to generate the final result. Ranbooru first runs a 1-step throwaway pass, then one real img2img pass per batch on that batch's booru image(s) with your prompt, sampler, scheduler, CFG, seed, styles and setting overrides (such as clip skip). Other extensions (ADetailer, hires fix) do not run on that second pass.
 - **Send to ControlNet** (with Use img2img): Sends the first booru image to **ControlNet Unit 1** of Forge Neo's built-in ControlNet instead of running img2img. Choose the model and preprocessor in Unit 1; Ranbooru enables the unit and supplies the image, and the Denoising slider sets the unit's weight, so you shouldn't need a dummy image.
 - **Denoising Strength**: This is the strength of the denoising filter. The higher the value, the more the picture will change from the original.
 - **Use last image as img2img** This uses the same picture for all the img2img generations in the same batch.
 - **Crop Center**: This crops the parsed images to the center before processing. This is useful if you want to keep the width/height you set.
-- **Use Cache**: This uses the cached version of the page once it has been used. This improves the speed of the search, but it can return the same results if the cache is not cleared. Cached replies last an hour and are shared between logged-in and anonymous requests, so after adding or changing an API key (Rule34, e621) turn Use cache off for one generation.
+- **Use Cache**: Reuses booru API replies for an hour (`user/ranbooru_cache.sqlite`). This improves the speed of the search, but it can return the same results while the cache lasts. Only Ranbooru's own booru requests are cached: not image downloads or other extensions. Error and login-refusal replies are never cached, and API keys are not stored. Cached replies are shared between logged-in and anonymous e621 requests, so after logging in to e621 turn Use cache off for one generation. Older versions kept the cache in `ranbooru_cache.sqlite` in the WebUI folder; that file can be deleted.
 
 ## How to use
 Check the usage.md file for a detailed explanation of how to use the extension.  
@@ -56,6 +57,7 @@ Also check my article on [CivitAI](https://civitai.com/articles/3357/ranbooru-th
 ### Forge Neo fork
 - Removed LoRAnado, the File panel (tags_search.txt / tags_remove.txt), Deepbooru (deleted from Forge Neo in July 2025), and Mix prompts, Chaos mode, Negative mode and Use same seed. Old `user/search` and `user/remove` files are left on disk but no longer used.
 - Send to ControlNet now targets Forge Neo's built-in ControlNet.
+- Use img2img works with Batch count above 1 (one img2img pass per batch); Gelbooru uses `sort:random`; Use cache only caches Ranbooru's booru requests; AIBooru supports post IDs; new Skip tags already in prompt option.
 
 ### 1.2
 - Added the ability to use * in the remove tags to remove every tag that contains the word
