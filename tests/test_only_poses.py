@@ -1,6 +1,7 @@
 """Forge-independent tests of the Only Poses / clothing tag filter."""
 import ast
 import json
+import re
 from pathlib import Path
 import unittest
 
@@ -8,7 +9,8 @@ MODULE_PATH = Path(__file__).resolve().parents[1] / 'scripts' / 'ranbooru.py'
 FUNCTIONS = {
     '_normalize_pose_tag', '_matches_structure', 'is_characteristic_tag',
     'filter_pose_tags', 'post_category_tags', 'load_pose_tag_groups',
-    'load_pose_name_tags', 'pose_names_for',
+    'load_pose_name_tags', 'pose_names_for', 'load_pose_name_qualifiers',
+    'has_series_qualifier',
 }
 GROUPS_PATH = MODULE_PATH.parents[1] / 'pose_tag_groups.json'
 NAMES_PATH = MODULE_PATH.parents[1] / 'pose_name_tags.json'
@@ -27,11 +29,12 @@ def load_pose_filter():
     found = {n.name for n in nodes if isinstance(n, ast.FunctionDef)}
     if found != FUNCTIONS:
         raise AssertionError(f'Missing pose helpers: {FUNCTIONS - found}')
-    namespace = {'json': json}
+    namespace = {'json': json, 're': re}
     module = ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[]))
     exec(compile(module, str(MODULE_PATH), 'exec'), namespace)
     namespace['pose_tag_groups'] = namespace['load_pose_tag_groups'](str(GROUPS_PATH))
     namespace['pose_name_tags'] = namespace['load_pose_name_tags'](str(NAMES_PATH))
+    namespace['pose_name_qualifiers'] = namespace['load_pose_name_qualifiers'](str(NAMES_PATH))
     return namespace
 
 
@@ -47,6 +50,7 @@ class TestOnlyPoses(unittest.TestCase):
         cls.names = ns['pose_name_tags']
         cls.load_names = staticmethod(ns['load_pose_name_tags'])
         cls.pose_names_for = staticmethod(ns['pose_names_for'])
+        cls.qualifiers = ns['pose_name_qualifiers']
 
     def test_strips_appearance_traits(self):
         for tag in (
@@ -129,6 +133,21 @@ class TestOnlyPoses(unittest.TestCase):
             self.assertFalse(self.is_char(tag, True, True, names=self.names), tag)
         for tag in ('1girl', 'solo', 'sitting', 'smile', 'saturday_night_fever'):
             self.assertFalse(self.is_char(tag, names=self.names), tag)
+
+    def test_series_qualifier_rule(self):
+        q = self.qualifiers
+        self.assertGreater(len(q), 3000)
+        for tag in ('jester_(fire_emblem)', 'jester_(fire_emblem)_(timeskip)',
+                    r'unknown_girl_\(kancolle\)', 'someone_(blue_archive)',
+                    'new_oc_(genshin_impact)'):
+            self.assertTrue(self.is_char(tag, qualifiers=q), tag)
+            self.assertFalse(self.is_char(tag), tag)
+        for tag in ('bow_(weapon)', 'diamond_(shape)', 'star_(symbol)',
+                    'pom_pom_(clothes)', 'someone_(cosplay)_x', 'anna_(1st_costume)',
+                    'saber_(swimsuit)', 'looking_at_viewer'):
+            self.assertFalse(self.is_char(tag, qualifiers=q), tag)
+        for tag in self.groups['keep']:
+            self.assertFalse(self.is_char(tag, True, True, qualifiers=q), tag)
 
     def test_name_list_switch(self):
         names_for = self.pose_names_for

@@ -1,5 +1,6 @@
 from io import BytesIO
 import html
+import re
 import random
 import requests
 import modules.scripts as scripts
@@ -515,6 +516,28 @@ def load_pose_name_tags(path):
         return frozenset()
 
 
+def load_pose_name_qualifiers(path):
+    """Series names that mark a tag as a character/series item: name_(series)."""
+    try:
+        with open(path, 'r', encoding='utf-8') as names_file:
+            data = json.load(names_file)
+        return frozenset(
+            q for q in data.get('qualifiers', []) if isinstance(q, str)
+        )
+    except (OSError, ValueError, AttributeError, TypeError):
+        return frozenset()
+
+
+POSE_QUALIFIER_PATTERN = re.compile(r'_\(([^()]+)\)')
+
+
+def has_series_qualifier(norm, qualifiers):
+    """jester_(fire_emblem)_(timeskip) -> True when 'fire_emblem' is a known series."""
+    if '_(' not in norm:
+        return False
+    return any(q in qualifiers for q in POSE_QUALIFIER_PATTERN.findall(norm))
+
+
 # Boorus that share Danbooru's tag names but report no tag categories.
 POSE_NAME_LIST_BOORUS = ('gelbooru',)
 
@@ -545,7 +568,7 @@ def _matches_structure(words, nouns, modifiers):
 
 
 def is_characteristic_tag(tag, strip_traits=True, strip_clothing=False,
-                          excluded=(), groups=None, names=()):
+                          excluded=(), groups=None, names=(), qualifiers=()):
     """Whether Only Poses / clothing stripping should remove this tag."""
     if groups is None:
         groups = pose_tag_groups
@@ -562,7 +585,7 @@ def is_characteristic_tag(tag, strip_traits=True, strip_clothing=False,
 
     if strip_traits:
         # Danbooru name list (character/copyright/artist), when enabled.
-        if norm in names:
+        if norm in names or has_series_qualifier(norm, qualifiers):
             return True
         if norm in groups['traits']:
             return True
@@ -582,14 +605,14 @@ def is_characteristic_tag(tag, strip_traits=True, strip_clothing=False,
 
 
 def filter_pose_tags(tags, strip_traits=True, strip_clothing=False,
-                     excluded=(), groups=None, names=()):
+                     excluded=(), groups=None, names=(), qualifiers=()):
     """Return the tags (in order) that survive Only Poses / clothing stripping."""
     if not strip_traits and not strip_clothing:
         return list(tags)
     return [
         tag for tag in tags
         if not is_characteristic_tag(tag, strip_traits, strip_clothing,
-                                     excluded, groups, names)
+                                     excluded, groups, names, qualifiers)
     ]
 
 
@@ -612,6 +635,9 @@ pose_tag_groups = load_pose_tag_groups(
     os.path.join(extension_root, 'pose_tag_groups.json')
 )
 pose_name_tags = load_pose_name_tags(
+    os.path.join(extension_root, 'pose_name_tags.json')
+)
+pose_name_qualifiers = load_pose_name_qualifiers(
     os.path.join(extension_root, 'pose_name_tags.json')
 )
 
@@ -3219,6 +3245,9 @@ class Script(scripts.Script):
             pose_names = pose_names_for(
                 booru, only_poses, names_all_boorus, pose_name_tags
             )
+            pose_qualifiers = pose_names_for(
+                booru, only_poses, names_all_boorus, pose_name_qualifiers
+            )
 
             if not clean_posts:
                 raise ValueError(
@@ -3435,7 +3464,8 @@ class Script(scripts.Script):
                     strip_traits=only_poses,
                     strip_clothing=strip_clothing,
                     excluded=pose_excluded_tags,
-                    names=pose_names
+                    names=pose_names,
+                    qualifiers=pose_qualifiers
                 )
 
                 new_prompt = ', '.join(tag.strip() for tag in prompt_tags if tag.strip())
@@ -4145,7 +4175,8 @@ class Script(scripts.Script):
                             strip_traits=only_poses,
                             strip_clothing=strip_clothing,
                             # Deepbooru emits Danbooru tag names.
-                            names=pose_name_tags
+                            names=pose_name_tags,
+                            qualifiers=pose_name_qualifiers
                         )
                         if tag.strip()
                     )

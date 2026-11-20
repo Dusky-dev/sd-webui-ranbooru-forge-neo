@@ -37,6 +37,25 @@ NAME_CATEGORIES = ((3, 'copyright', 5000), (4, 'character', 20000),
 MIN_ARTIST_LENGTH = 5
 # Pose names that Danbooru files as copyrights but are pose tags in practice.
 NAME_KEEP = {'saturday_night_fever'}
+
+# name_(series) rule: a tag whose parenthesised qualifier is a series is a
+# character or series item (jester_(fire_emblem)). Qualifiers are copyright
+# names plus abbreviations used by at least MIN_QUALIFIER_USES characters
+# (kancolle, fate, nikke), minus costume/role words such as (1st_costume).
+MIN_QUALIFIER_USES = 8
+QUALIFIER = re.compile(r'_\(([^()]+)\)')
+QUALIFIER_IGNORE = {
+    'casual', 'female', 'male', 'vtuber', 'character', 'summer', 'cookie',
+    'new_year', 'young', 'school_uniform', 'timeskip', 'stand', 'human',
+    'rider', 'lancer', 'assassin', 'caster', 'saber', 'archer', 'berserker',
+    'ruler', 'avenger', 'dress', 'maid', 'halloween', 'cat', 'dog', 'adult',
+    'racing', 'pajamas', 'summer_loungewear', 'armed', 'normal', 'tales',
+    'league', 'child', 'old', 'cosplay', 'artist', 'real_life', 'original',
+    'animal', 'object', 'food', 'weapon', 'shape', 'medium', 'pattern',
+    'meme', 'symbol', 'company', 'band', 'game', 'series', 'anime', 'manga',
+    'novel', 'film', 'movie', 'comic', 'creature', 'hair', 'clothes',
+}
+QUALIFIER_IGNORE_WORDS = ('costume', 'ascension', 'swimsuit', 'outfit', 'uniform')
 ALL = None  # every section except the SKIPPED ones
 
 SKIPPED = {'see also', 'related tag groups', 'about', 'external links', 'unrelated'}
@@ -188,10 +207,22 @@ def build_names():
         if name == 'artist':
             tags = [tag for tag in tags if len(tag) >= MIN_ARTIST_LENGTH]
         data[name] = sorted(set(tags) - NAME_KEEP)
+    uses = {}
+    for tag in data['character']:
+        for qualifier in QUALIFIER.findall(tag):
+            uses[qualifier] = uses.get(qualifier, 0) + 1
+    qualifiers = set(data['copyright']) | {
+        q for q, count in uses.items() if count >= MIN_QUALIFIER_USES
+    }
+    data['qualifiers'] = sorted(
+        q for q in qualifiers - QUALIFIER_IGNORE
+        if not any(word in q for word in QUALIFIER_IGNORE_WORDS)
+    )
     NAMES_OUTPUT.write_text(json.dumps(data, indent=0, ensure_ascii=False) + '\n',
                             encoding='utf-8')
     print(f'wrote {NAMES_OUTPUT}: ' + ', '.join(
-        f'{len(data[name])} {name}' for _, name, _ in NAME_CATEGORIES))
+        f'{len(data[name])} {name}' for _, name, _ in NAME_CATEGORIES)
+        + f", {len(data['qualifiers'])} series qualifiers")
 
 
 def sections(body):
