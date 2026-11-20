@@ -371,6 +371,62 @@ class ForgeHarnessTests(unittest.TestCase):
             state.interrupted = False
         self.assertEqual(len([c for c in self.calls if hasattr(c, 'init_images')]), 1)
 
+    # -- Use cache --
+
+    def test_use_cache_is_ranbooru_only_and_keeps_no_secrets(self):
+        import requests
+        import requests_cache
+        from requests.adapters import BaseAdapter
+
+        replies = []
+
+        class FakeAdapter(BaseAdapter):
+            def send(self, request, **kwargs):
+                body = replies.pop(0)
+                response = requests.Response()
+                response.status_code = 200
+                response._content = body.encode()
+                from urllib3 import HTTPResponse
+                response.raw = HTTPResponse(body=io.BytesIO(body.encode()), status=200,
+                                            preload_content=False, request_url=request.url)
+                response.headers['Content-Type'] = 'application/json'
+                response.url = request.url
+                response.request = request
+                return response
+
+            def close(self):
+                pass
+
+        http = self.rb.booru_http
+        http.set_cache(True)
+        try:
+            self.assertFalse(requests_cache.patcher.is_installed())
+            self.assertTrue(self.rb.RANBOORU_CACHE_FILE.startswith(self.tmp))
+            http.session.mount('https://', FakeAdapter())
+            http.session.cache.clear()
+            url = 'https://api.rule34.xxx/index.php?page=dapi&json=1&tags=solo'
+
+            # A refusal is not cached: adding the login gets a fresh reply.
+            replies[:] = ['"Missing authentication. Go to api.rule34.xxx"', '[{"id": 1}]']
+            self.assertIn('Missing', http.get(url + '&user_id=1&api_key=SECRET').text)
+            first = http.get(url + '&user_id=1&api_key=SECRET')
+            self.assertFalse(getattr(first, 'from_cache', False))
+            again = http.get(url + '&user_id=1&api_key=SECRET')
+            self.assertTrue(again.from_cache)
+
+            # The stored request has no credentials.
+            stored = ' '.join(str(r.request.url) + str(dict(r.request.headers))
+                              for r in http.session.cache.responses.values())
+            self.assertNotIn('SECRET', stored)
+
+            # cache=False bypasses the cache (Gelbooru sort:random).
+            with mock.patch.object(self.rb.requests, 'get', return_value='plain') as plain:
+                self.assertEqual(http.get(url, cache=False), 'plain')
+                plain.assert_called_once()
+        finally:
+            http.set_cache(False)
+        self.assertIsNone(http.session)
+
 
 if __name__ == '__main__':
     unittest.main()

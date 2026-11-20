@@ -100,7 +100,7 @@ class AdapterTestBase(unittest.TestCase):
             self.ranges.append((low, high))
             return high
 
-        self.ns = {'requests': self.requests, 're': re, 'quote_plus': quote_plus,
+        self.ns = {'requests': self.requests, 'booru_http': self.requests, 're': re, 'quote_plus': quote_plus,
                    'POST_AMOUNT': 100, 'COUNT': 0,
                    'random': types.SimpleNamespace(randint=randint)}
         exec(self.module, self.ns)

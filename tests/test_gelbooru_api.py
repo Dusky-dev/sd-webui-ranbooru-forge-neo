@@ -70,7 +70,7 @@ class GelbooruResponseTests(unittest.TestCase):
         self.requests = RequestsStub()
         self.sleeps = []
         self.namespace = {
-            "requests": self.requests,
+            "requests": self.requests, "booru_http": self.requests,
             "POST_AMOUNT": 100,
             "COUNT": 100,
             "random": types.SimpleNamespace(randrange=lambda stop: 0),

@@ -929,6 +929,89 @@ def resolve_booru_credentials(booru, api_key, user_id, save_credentials,
     return None, None
 
 
+# --- Booru HTTP and the Use cache option --------------------------------------
+# Booru API requests go through booru_http. With Use cache on they use a
+# Ranbooru-only cache (user/ranbooru_cache.sqlite, one hour); everything else
+# in the WebUI, and Ranbooru's own image downloads, use plain requests.
+RANBOORU_CACHE_FILE = os.path.join(user_data_dir, 'ranbooru_cache')
+# Credentials are left out of what is stored, whatever requests-cache defaults
+# the installed version has.
+CACHE_IGNORED_PARAMETERS = (
+    'api_key', 'user_id', 'login', 'password_hash', 'access_token',
+    'Authorization', 'X-API-Key',
+)
+CACHE_REFUSED_TEXT = (
+    'missing authentication', '"success":false', '"success": false',
+    'too deep', 'search error', 'api limited',
+)
+
+
+def cacheable_reply(response):
+    """Cache only successful API replies, never errors or refusals, so a
+    login added later is not answered from an hour-old refusal."""
+    try:
+        if response.status_code != 200:
+            return False
+        text = (response.text or '')[:4096].lstrip().lower()
+    except Exception:
+        return False
+    if not text.startswith(('[', '{', '<?xml', '<posts')):
+        return False
+    return not any(marker in text for marker in CACHE_REFUSED_TEXT)
+
+
+class BooruHTTP:
+    def __init__(self):
+        self.session = None
+
+    def set_cache(self, enabled):
+        if enabled and self.session is None:
+            try:
+                self.session = requests_cache.CachedSession(
+                    RANBOORU_CACHE_FILE,
+                    backend='sqlite',
+                    expire_after=3600,
+                    ignored_parameters=CACHE_IGNORED_PARAMETERS,
+                    # Gelbooru's Fringe Benefits cookie changes the results.
+                    match_headers=['Cookie'],
+                    filter_fn=cacheable_reply,
+                )
+            except Exception as exc:
+                print(f'[Ranbooru] Use cache unavailable ({exc}); continuing without it.')
+                self.session = None
+        elif not enabled and self.session is not None:
+            try:
+                self.session.close()
+            except Exception:
+                pass
+            self.session = None
+
+    def get(self, url, cache=True, **kwargs):
+        if cache and self.session is not None:
+            return self.session.get(url, **kwargs)
+        return requests.get(url, **kwargs)
+
+
+booru_http = BooruHTTP()
+
+
+def remove_legacy_global_cache():
+    """Older Ranbooru installed a process-wide cache; a "Reload UI" keeps it
+    patched into requests. Remove it, but only if it is Ranbooru's."""
+    try:
+        if not requests_cache.patcher.is_installed():
+            return
+        cache = requests_cache.get_cache()
+        name = str(getattr(cache, 'cache_name', '') or getattr(cache, 'db_path', ''))
+        if 'ranbooru_cache' in name:
+            requests_cache.uninstall_cache()
+    except Exception:
+        pass
+
+
+remove_legacy_global_cache()
+
+
 def redact_secrets(text, secrets=()):
     text = str(text)
     for secret in secrets:
@@ -950,7 +1033,7 @@ def fetch_booru_json(url, site, headers=None, auth=None, secrets=()):
     with credentials redacted. An empty body is an empty result.
     """
     try:
-        response = requests.get(
+        response = booru_http.get(
             url, headers=headers, auth=auth, timeout=20
         )
     except requests.exceptions.RequestException as exc:
@@ -1016,7 +1099,7 @@ def fetch_xml_count(url, headers=None):
     Used only to pick a page in range, so any failure is soft.
     """
     try:
-        response = requests.get(url, headers=headers, timeout=20)
+        response = booru_http.get(url, headers=headers, timeout=20)
         match = POSTS_COUNT_PATTERN.search(getattr(response, 'text', '') or '')
     except (requests.exceptions.RequestException, AttributeError, TypeError):
         return None
@@ -1097,7 +1180,7 @@ class Gelbooru(Booru):
 
         for attempt in range(3):
             try:
-                response = requests.get(
+                response = booru_http.get(
                     url,
                     params=auth,
                     cookies=cookies,
@@ -1507,7 +1590,7 @@ class AIBooru(Booru):
 
     def _count(self, add_tags):
         try:
-            response = requests.get(
+            response = booru_http.get(
                 'https://aibooru.online/counts/posts.json?'
                 + add_tags.lstrip('&'),
                 headers=self.headers,
@@ -1656,7 +1739,7 @@ class Danbooru(Booru):
             url = f'{self.booru_url}&page={page}{id}{add_tags}'
             self.last_url = url
             try:
-                response = requests.get(url, headers=self.headers, timeout=20)
+                response = booru_http.get(url, headers=self.headers, timeout=20)
             except requests.RequestException as exc:
                 raise RuntimeError(
                     f'[Ranbooru] Unable to contact Danbooru: {exc}'
@@ -1679,7 +1762,7 @@ class Danbooru(Booru):
         url = f'https://danbooru.donmai.us/posts/{id}.json'
         self.last_url = url
         try:
-            response = requests.get(url, headers=self.headers, timeout=20)
+            response = booru_http.get(url, headers=self.headers, timeout=20)
         except requests.RequestException as exc:
             raise RuntimeError(
                 f'[Ranbooru] Unable to contact Danbooru: {exc}'
@@ -1820,7 +1903,7 @@ class e621(Booru):
     def _request(self, url):
         self.last_url = url
         try:
-            response = requests.get(url, headers=self.headers, auth=self.auth, timeout=20)
+            response = booru_http.get(url, headers=self.headers, auth=self.auth, timeout=20)
         except requests.RequestException as exc:
             raise RuntimeError(f'[Ranbooru] Unable to contact e621: {exc}') from exc
         return self._read_api_json(response)
@@ -1894,7 +1977,7 @@ class e621(Booru):
             chunk = missing[start:start + self.LOOKUP_CHUNK]
             url = self.TAGS_URL + quote(','.join(chunk), safe=',')
             try:
-                response = requests.get(url, headers=self.headers, auth=self.auth, timeout=20)
+                response = booru_http.get(url, headers=self.headers, auth=self.auth, timeout=20)
                 rows = response.json() if response.status_code == 200 else None
             except (requests.RequestException, ValueError) as exc:
                 rows = None
@@ -2620,22 +2703,8 @@ class Script(scripts.Script):
                 locals()
             )
 
-        # Manage Cache
-        if (
-            use_cache
-            and not requests_cache.patcher.is_installed()
-        ):
-            requests_cache.install_cache(
-                'ranbooru_cache',
-                backend='sqlite',
-                expire_after=3600
-            )
-
-        elif (
-            not use_cache
-            and requests_cache.patcher.is_installed()
-        ):
-            requests_cache.uninstall_cache()
+        # Use cache applies to Ranbooru's own booru API requests only.
+        booru_http.set_cache(use_cache)
 
         if enabled:
             # MRU is updated only by a genuine Ranbooru generation attempt;
