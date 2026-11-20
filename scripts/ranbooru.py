@@ -829,20 +829,15 @@ def send_image_to_controlnet(p, image, weight):
 
 
 def get_available_ratings(booru):
-    mature_ratings = gr.Radio.update(
-        choices=RATINGS[booru].keys(),
+    # gr.update: the per-component .update() methods were removed in Gradio 4.
+    return gr.update(
+        choices=list(RATINGS.get(booru, RATINGS['safebooru']).keys()),
         value="All"
     )
 
-    return mature_ratings
-
 
 def show_fringe_benefits(booru):
-    if booru == 'gelbooru':
-        return gr.Checkbox.update(visible=True)
-
-    else:
-        return gr.Checkbox.update(visible=False)
+    return gr.update(visible=(booru == 'gelbooru'))
 
 
 def check_exception(booru, parameters):
