@@ -4,28 +4,36 @@ Ranbooru is an extension for the [automatic111 Stable Diffusion UI](https://gith
 ![Alt text](pics/image.png)
 
 ## Installation
-Just copy the script from the scripts folder above into the extensions folder of your 1111automatic installation. Then restart 1111automatic, by clicking the "Reload UI" button on the bottom of the page.
-You should find a new panel called "Ranbooru" on the bottom of the page.
+This fork targets [Forge Neo](https://github.com/Haoming02/sd-webui-forge-classic) (it should also work on other A1111-style UIs).
+
+1. Open the **Extensions** tab, then **Install from URL**.
+2. Paste `https://github.com/Dusky-dev/sd-webui-ranbooru-forge-neo` and click **Install**.
+3. Restart the UI. You should find a new panel called "Ranbooru" in the txt2img and img2img tabs.
+
+You can also `git clone` the repository into the `extensions` folder. Install the whole repository, not just the script: the extension also needs the files next to it (`pose_tag_groups.json`, `pose_name_tags.json`, `credentials_manager.py`, `javascript/`).
 
 ## Features
 The extension is now divided into two main functionalities that can be used together or separately:
 ### Ranbooru
 This is the main part of the extension. It gets a random set of tags from boorus pictures.  
 Here's an explanation of all the parameters:
-- **Booru**: The booru to get the tags from. Right now Gelbooru, Rule34, Safebooru, yande.re, konachan, aibooru, danbooru and xbooru are implemented. You can easily add more creating a class for the booru and adding it to the booru list in the script.
+- **Booru**: The booru to get the tags from. Right now Gelbooru, Rule34, Safebooru, yande.re, konachan, aibooru, danbooru, xbooru and e621 are implemented. You can easily add more creating a class for the booru and adding it to the booru list in the script.
 
-### ⚠️ Gelbooru API Credentials Required
-As of June 2025, Gelbooru requires an API key and user ID to access its API. When you select Gelbooru in the Ranbooru panel, you will see fields to enter your API key and user ID. You can optionally save these credentials securely to disk. If credentials are saved, the input fields will be hidden and a message will display the path to the credentials file. You can clear the saved credentials at any time to re-enter new ones.
+### ⚠️ API credentials (Gelbooru, Rule34, e621)
+Gelbooru (since June 2025) and Rule34 require an API key and user ID; e621 works anonymously but accepts an optional login. When you select one of these boorus, the Ranbooru panel shows fields for that site's credentials. You can optionally save them to disk (`user/credentials/credentials.json`, never uploaded by Git). Once saved, the fields are hidden and a message shows the path to the credentials file; **Clear saved credentials** removes them for the selected booru only. Each site's credentials are only ever sent to that site.
 
-- **API Key & User ID (Gelbooru only)**: Required to use Gelbooru. You can obtain these from your Gelbooru account settings. If credentials are saved, the UI will show a status message and hide the input fields for security.
+- **Gelbooru:** API key and user ID from your Gelbooru account options.
+- **Rule34:** API key and user ID from **Account > Options** on rule34.xxx. Without them, Rule34 returns no posts and Ranbooru reports that a login is needed.
+- **e621 (optional):** your username and an API key from **Account > Manage API Access**. They are sent as an HTTP login, not in the URL. About 8% of e621 posts have no image link for anonymous users (these are skipped); logging in may make some of them available, depending on your account's blacklist settings.
 
-- **Max Pages**: The maximum amount of pages to get the tags from. The extension will get a random page from the booru and then get the tags from one or more random pictures from that page.
-- **Post ID**: Here you can specify the ID of the post to get the tags from. If you leave it blank, the extension will get a random post (or more than one) from the random page.
+- **Max Pages**: The maximum amount of pages to get the tags from. The extension will get a random page from the booru and then get the tags from one or more random pictures from that page. Where the booru reports how many posts match, the page is picked only among pages that exist, and each site's own page limit is respected.
+- **Post ID**: Here you can specify the ID of the post to get the tags from. If you leave it blank, the extension will get a random post (or more than one) from the random page. Supported on every booru except AIBooru.
 - **Tags to Search (Pre)**: This add the tags you define (this should be separated by commas e.g: 1girl,solo,short_hair) to the search query. This is useful if you want to get tags from a specific category, like "1girl" or "solo".
 - **Tags to Remove (Post)**: This remove the tags you define (this should be separated by commas e.g: 1girl,solo,short_hair) from the result query. This is useful if you want to remove tags that are too generic, like "1girl" or "solo". You can also use * with any tag to remove every tags which contains the related word. e.g: *hair will remove every tag that contains the word "hair".
 - **Mature Rating**: This sets the mature rating of the booru. This is useful if you want to get only SFW or NSFW tags. It only works on supported boorus (right now it has been tested only on Gelbooru).
 - **Remove Bad Tags**: This remove tags that you usually don't need (watermarks,text,censor)
 - **Shuffle Tags**: This shuffle the tags before adding them to the text.
+- **Only poses**: Removes appearance tags (hair, eyes, skin, body traits) plus character, copyright and artist names, keeping pose, expression and composition tags. **Strip clothing & accessories** also removes outfits and accessories. See [usage.md](usage.md#only-poses) for what each booru supports.
 - **Convert** "\_" to Spaces": This convert \_ to spaces in the tags.
 - **Use the same prompt for all images**: This use the same prompt for all the generated images in the same batch. If not selected, each image will have a different prompt.
 - **Fringe Benefits**: This option is available only for Gelbooru and enables all the hidden content available on the website. This is equivalent to enabling the "Display all site content" flag in the Gelbooru website settings.
