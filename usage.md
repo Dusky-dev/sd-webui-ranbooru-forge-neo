@@ -8,7 +8,7 @@ To do a basic search you'll need to set the following parameters:
 - **Tags to search (pre)**: The tags to search for on the booru. These should be the same used on a booru, but separated by a comma (e.g. `'1girl, solo'`).
 
 ### Optional
-- **Max Pages**: This is the number of pages to search on the booru. Each page has 100 images, so if you set this to 5, it will search 500 images. This changes the variety of images you'll get.
+- **Max Pages**: Normally Ranbooru draws random posts from the whole search and this setting does not apply. It is the number of 100-post pages to pick from when your tags set their own order (such as `sort:score`), when the booru refuses a random draw, or on Danbooru when both tag slots are used.
 - **Tags to remove (post)**: These are the tags to remove from the prompt after the search. (e.g. If you search for `'1girl, solo'` and remove `'solo'`, the final prompt won't have 'solo' in it.)
 - **Use the same prompt for all images**: By default you'll get a different prompt for each image you create. If you want to use the same prompt for all images, set this to true.
 
@@ -31,7 +31,7 @@ You can use the prompt plus the original image of the random booru pictures to c
 - **Use img2img**: Set this to true to use the img2img mode.
 
 ### Optional
-- **Max Pages**: This is the number of pages to search on the booru. Each page has 100 images, so if you set this to 5, it will search 500 images. This changes the variety of images you'll get.
+- **Max Pages**: Normally Ranbooru draws random posts from the whole search and this setting does not apply. It is the number of 100-post pages to pick from when your tags set their own order (such as `sort:score`), when the booru refuses a random draw, or on Danbooru when both tag slots are used.
 - **Tags to remove (post)**: These are the tags to remove from the prompt after the search. (e.g. If you search for `'1girl, solo'` and remove `'solo'`, the final prompt won't have 'solo' in it.)
 - **Use the same prompt for all images**: By default you'll get a different prompt for each image you create. If you want to use the same prompt for all images, set this to true.
 - **Denoising Strength**: This is the strength of the img2img denoiser. The higher the number, the more the picture will differ from the original. The default is 0.75.
@@ -43,7 +43,7 @@ These can be used with the Basic Search and img2img examples.
 Enable `Only poses` to keep the composition of the random posts (pose, action, expression, camera angle, subject count like `1girl`) while removing the tags that describe *who* is in the picture:
 - **Appearance:** hair colour, length and style (`long_hair`, `twintails`, `blunt_bangs`), eyes (`blue_eyes`, `slit_pupils`), skin, body type (`large_breasts`, `muscular`), animal ears, tails, horns, wings and halos, moles, scars and freckles.
 - **Character, copyright and artist names:** removed using the booru's own tag categories on **Danbooru and AIBooru**. On **e621**, whose posts no longer include categories, the prompt's tags are looked up with e621's tag API (usually one request per generation, cached), and artist, copyright, character and species tags are removed. This lookup also runs without Only poses: like the old adapter, e621 meta, lore and invalid tags (`hi_res`, `2026`, `16:9`) are always left out of the prompt. If the lookup fails, generation continues without it. On **Gelbooru**, which uses the same tag names but doesn't report categories, a list of Danbooru's most-used names is used instead (`pose_name_tags.json`: 20,000 characters, 5,000 copyrights, ~9,700 artists). Measured on recent Danbooru posts, this list covers about 97% of copyright tags, 83% of character tags and only about 23% of artist tags, because there are so many artists. Expect most artist names to get through. Tags shaped like `name_(series)` are also removed when the series is a known Danbooru copyright or a common series abbreviation such as `kancolle` or `fate`. Costume qualifiers like `_(1st_costume)` or `_(swimsuit)` don't count. This rule catches about half of the characters the list misses, along with series-specific items such as `vision_(genshin_impact)`. Other boorus only catch `*_(artist)` and `*_(cosplay)` tags unless the experimental option below is on.
-- **Experimental: strip Danbooru name list on every booru:** applies the same name list on every other booru (checked on Safebooru, Xbooru, Konachan and yande.re). A name that doesn't exist on that booru simply matches nothing. Very short artist names are left out of the list because they are often ordinary words elsewhere.
+- **Experimental: strip Danbooru name list on every booru:** applies the same name list on every other booru (checked on Safebooru, Xbooru and Konachan). A name that doesn't exist on that booru simply matches nothing. Very short artist names are left out of the list because they are often ordinary words elsewhere.
 
 `Strip clothing & accessories` is a separate toggle (off by default). It works with or without `Only poses` and removes outfits, legwear, footwear, headwear, hair ornaments, jewelry, glasses and makeup (`white_shirt`, `pleated_skirt`, `school_uniform`, `hair_ribbon`).
 
