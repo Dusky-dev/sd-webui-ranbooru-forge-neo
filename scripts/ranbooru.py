@@ -5,7 +5,7 @@ import random
 import requests
 import copy
 import dataclasses
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, unquote_plus
 import modules.scripts as scripts
 import gradio as gr
 import os
@@ -1151,6 +1151,18 @@ class Gelbooru(Booru):
     class HTMLResponseError(RuntimeError):
         """A Gelbooru page returned HTML instead of JSON."""
 
+    class TooDeepError(HTMLResponseError):
+        """Gelbooru refused a page past its paging limit ("Too deep!")."""
+
+    # Gelbooru answers pages past its paging limit with a plain "Too deep!
+    # Pull it back some." (HTTP 200). In November 2026 the limit was about
+    # 1,000 posts: page (pid) 10 served, 11 refused at limit=100 (measured by
+    # the sd-webui-ranbooru-D fork; a user log showed pid 80 refused). Random
+    # posts therefore come from page 0 with sort:random, which Gelbooru draws
+    # from the whole search; pages are only walked, capped here, when the
+    # search has its own sort: order.
+    MAX_PAGES = 10
+
 
     def __init__(self, fringe_benefits, api_key=None, user_id=None):
         super().__init__(
@@ -1166,7 +1178,7 @@ class Gelbooru(Booru):
         self.user_id = user_id
         self.headers = {'User-Agent': 'Ranbooru-Forge-Neo/1.0'}
 
-    def _fetch_json(self, url, page_number=None):
+    def _fetch_json(self, url, page_number=None, cache=True):
         """Fetch and validate a post page, without exposing credentials in logs.
 
         Auth parameters are deliberately separate from self.last_url, and no
@@ -1182,6 +1194,7 @@ class Gelbooru(Booru):
             try:
                 response = booru_http.get(
                     url,
+                    cache=cache,
                     params=auth,
                     cookies=cookies,
                     headers=self.headers,
@@ -1243,6 +1256,11 @@ class Gelbooru(Booru):
                 # HTML login/challenge/error pages are not transient JSON errors.
                 content_type = response.headers.get('Content-Type', '').lower()
                 prefix = (response.text or '').lstrip()[:120].lower()
+                if 'too deep' in prefix:
+                    raise self.TooDeepError(
+                        f'[Ranbooru] Gelbooru refused page {page_number}: it '
+                        'only pages about 1,000 posts into a search.'
+                    ) from None
                 if 'html' in content_type or prefix.startswith(('<!doctype', '<html')):
                     if not auth:
                         raise self.HTMLResponseError(
@@ -1332,11 +1350,44 @@ class Gelbooru(Booru):
             data, COUNT = fetch_page(0)
             return data
 
+        # Random posts: one request, page 0 with sort:random, which Gelbooru
+        # draws from the whole search. Searches with their own sort: order
+        # walk pages instead (capped at Gelbooru's paging limit).
+        if 'sort:' not in unquote_plus(add_tags).lower():
+            random_tags = (
+                f'{add_tags}+sort:random' if '&tags=' in add_tags
+                else f'{add_tags}&tags=sort:random'
+            )
+            try:
+                # Same URL every time: never answer it from the cache.
+                url = f'{self.booru_url}&pid=0{random_tags}'
+                self.last_url = url
+                data, COUNT = self._fetch_json(url, page_number=0, cache=False)
+            except self.HTMLResponseError as exc:
+                print(
+                    f'[Ranbooru] Gelbooru sort:random was refused ({exc}); '
+                    'walking pages instead.'
+                )
+            else:
+                if data['post'] or COUNT == 0:
+                    sample = ', '.join(
+                        str(post.get('id')) for post in data['post'][:5]
+                    )
+                    print(
+                        f'[Ranbooru] Gelbooru sort:random: matching_posts='
+                        f'{COUNT}, {len(data["post"])} posts (ids {sample}...)'
+                    )
+                    return data
+                print(
+                    '[Ranbooru] Gelbooru sort:random returned no posts; '
+                    'walking pages instead.'
+                )
+
         # Page 0 tells us how many pages are really available for this query.
         # Do not select a random page until we have validated that response.
         first_page, COUNT = fetch_page(0)
         available_pages = max(1, (COUNT + POST_AMOUNT - 1) // POST_AMOUNT)
-        eligible_pages = min(requested_pages, available_pages)
+        eligible_pages = min(requested_pages, available_pages, self.MAX_PAGES)
         selected_page = random.randrange(eligible_pages)
         print(
             f'[Ranbooru] Gelbooru matching_posts={COUNT} '
@@ -1364,13 +1415,8 @@ class Gelbooru(Booru):
                 )
                 data = first_page
 
-        if COUNT > requested_pages * POST_AMOUNT:
-            print(
-                f' Processing up to {requested_pages * POST_AMOUNT} '
-                f'out of {COUNT} results.'
-            )
-        else:
-            print(f' Processing {COUNT} results.')
+        shown = min(eligible_pages * POST_AMOUNT, COUNT)
+        print(f' Processing up to {shown} out of {COUNT} results.')
         return data
 
     def get_post(self, add_tags, max_pages=10, id=''):
