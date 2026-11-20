@@ -17,9 +17,33 @@ jobs:
           python-version: '3.13'
       - name: Compile Python sources
         run: python -m compileall -q scripts/ranbooru.py tests
+      - name: Check for undefined names
+        run: |
+          python -m pip install pyflakes
+          python tools/check_undefined_names.py scripts/ranbooru.py tests
       - name: Run mocked API and progress regression tests
         run: python -m unittest discover -s tests -v
       - name: Check JavaScript syntax
         run: node --check javascript/ranbooru_progress.js
       - name: Test progress bar overlay
         run: node tests/test_progress_overlay.js
+
+  forge-harness:
+    # Imports the real script under Forge Neo's Gradio, builds the UI, calls
+    # the event handlers and runs the generation hooks (no network).
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Install Forge Neo's Gradio and Ranbooru's dependencies
+        run: |
+          python -m pip install "gradio==4.40.0" "huggingface_hub<0.26" audioop-lts \
+            "requests-cache>=1.0" requests numpy pillow
+      - name: Run the Forge harness
+        env:
+          RANBOORU_REQUIRE_GRADIO: '1'
+        run: python -m unittest tests.test_forge_harness -v
