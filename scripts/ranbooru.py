@@ -1564,87 +1564,123 @@ class Danbooru(Booru):
         return {'post': [post]}
 
 class e621(Booru):
+    # e621 rejects page 0 and anything beyond page 750 (HTTP 410).
+    MAX_PAGE = 750
+    TAG_CATEGORIES = ('general', 'artist', 'copyright', 'character', 'species')
+
     def __init__(self):
         super().__init__(
-            'danbooru',
+            'e621',
             f'https://e621.net/posts.json?limit={POST_AMOUNT}'
         )
+        # e621 asks API clients for a descriptive User-Agent.
+        self.headers['user-agent'] = 'Ranbooru-Forge-Neo/1.0 (tag prompt extension)'
+
+    @staticmethod
+    def _read_api_json(response):
+        """Return the post list; raise a readable error for e621 error objects."""
+        status = getattr(response, 'status_code', 200)
+        try:
+            result = response.json()
+        except ValueError as exc:
+            raise RuntimeError(
+                f'[Ranbooru] e621 returned a non-JSON response (HTTP {status}).'
+            ) from exc
+
+        if isinstance(result, dict) and (
+            status >= 400 or result.get('success') is False
+        ):
+            message = result.get('message') or result.get('reason') or 'request rejected'
+            if status == 429:
+                message += '. Rate limit reached; retry later.'
+            raise RuntimeError(f'[Ranbooru] e621 API error (HTTP {status}): {message}')
+        if status >= 400:
+            raise RuntimeError(f'[Ranbooru] e621 API error (HTTP {status}).')
+
+        # The current API returns a bare list; older versions wrapped it.
+        if isinstance(result, dict) and isinstance(result.get('posts'), list):
+            result = result['posts']
+        elif isinstance(result, dict) and isinstance(result.get('post'), dict):
+            result = [result['post']]
+        if not isinstance(result, list):
+            raise RuntimeError(
+                f'[Ranbooru] e621 API returned invalid data (HTTP {status}).'
+            )
+        return result
+
+    @classmethod
+    def _normalize_post(cls, post):
+        """Map an e621 post onto the fields before_process reads, or None to skip it."""
+        if not isinstance(post, dict):
+            return None
+        flags = post.get('flags')
+        if isinstance(flags, dict) and flags.get('deleted'):
+            return None
+        files = post.get('files') or post.get('file') or {}
+        original = files.get('original', files) if isinstance(files, dict) else {}
+        file_url = original.get('url') if isinstance(original, dict) else None
+        # Anonymous requests get no image URL for some posts; skip those so
+        # img2img and Deepbooru never fall back to an unrelated picture.
+        if not isinstance(file_url, str) or not file_url:
+            return None
+
+        tags = post.get('tags')
+        if isinstance(tags, dict):
+            # Older API: tags grouped by category.
+            post['ranbooru_tag_categories'] = {
+                category: tags.get(category, [])
+                for category in ('artist', 'copyright', 'character', 'species')
+                if isinstance(tags.get(category), list)
+            }
+            tags = [
+                tag
+                for category in cls.TAG_CATEGORIES
+                for tag in tags.get(category, [])
+                if isinstance(tag, str)
+            ]
+        elif isinstance(tags, str):
+            tags = tags.split()
+        if not isinstance(tags, list):
+            return None
+        tags = [tag for tag in tags if isinstance(tag, str) and tag]
+        if 'animated' in tags:
+            return None
+
+        stats = post.get('stats') if isinstance(post.get('stats'), dict) else post
+        score = stats.get('score', 0)
+        if isinstance(score, dict):
+            score = score.get('total', 0)
+        if type(score) is not int:
+            score = 0
+
+        post['tags'] = ' '.join(tags)
+        post['score'] = score
+        post['file_url'] = file_url
+        return post
+
+    def _request(self, url):
+        self.last_url = url
+        try:
+            response = requests.get(url, headers=self.headers, timeout=20)
+        except requests.RequestException as exc:
+            raise RuntimeError(f'[Ranbooru] Unable to contact e621: {exc}') from exc
+        return self._read_api_json(response)
 
     def get_data(self, add_tags, max_pages=10, id=''):
         global COUNT
 
-        loop_msg = True
+        if id:
+            add_tags = ''
 
-        # run loop at most twice
-        for loop in range(2):
-
-            if id:
-                add_tags = ''
-
-            url = (
-                f"{self.booru_url}"
-                f"&page={random.randint(0, max_pages - 1)}"
-                f"{id}{add_tags}"
-            )
-
-            self.last_url = url
-
-            res = requests.get(
-                url,
-                headers=self.headers
-            )
-
-            data = res.json()['posts']
-
-            COUNT = len(data)
-
-            for post in data:
-                temp_tags = []
-
-                sublevels = [
-                    'general',
-                    'artist',
-                    'copyright',
-                    'character',
-                    'species'
-                ]
-
-                for sublevel in sublevels:
-                    temp_tags.extend(post['tags'][sublevel])
-
-                # Only Poses mode strips these categories (and species).
-                post['ranbooru_tag_categories'] = {
-                    sublevel: post['tags'].get(sublevel, [])
-                    for sublevel in (
-                        'artist', 'copyright', 'character', 'species'
-                    )
-                }
-
-                post['tags'] = ' '.join(temp_tags)
-                post['score'] = post['score']['total']
-
-            if COUNT <= max_pages * POST_AMOUNT:
-                max_pages = COUNT // POST_AMOUNT + 1
-
-                # If max_pages is bigger than available pages,
-                # loop the function with updated max_pages
-                # based on the value of COUNT
-
-                while loop_msg:
-                    print(f" Processing {COUNT} results.")
-                    loop_msg = False
-                    continue
-
-            else:
-                print(
-                    f" Processing "
-                    f"{max_pages * POST_AMOUNT} "
-                    f"out of {COUNT} results."
-                )
-
-                break
-
-        return {'post': data}
+        # One request to a random ONE-based page; before_process retries
+        # page 1 itself when a random page comes back empty.
+        last_page = max(1, min(int(max_pages), self.MAX_PAGE))
+        page = random.randint(1, last_page)
+        raw_posts = self._request(f'{self.booru_url}&page={page}{id}{add_tags}')
+        posts = [p for p in map(self._normalize_post, raw_posts) if p is not None]
+        COUNT = len(posts)
+        print(f'[Ranbooru] e621: {COUNT} usable posts on page {page}.')
+        return {'post': posts}
 
     def get_post(self, add_tags, max_pages=10, id=''):
         return self.get_data(

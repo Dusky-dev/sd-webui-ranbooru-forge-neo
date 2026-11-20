@@ -1,0 +1,143 @@
+"""Forge-independent tests of the e621 adapter against current and legacy API shapes."""
+import ast
+import types
+import unittest
+from pathlib import Path
+
+
+class Response:
+    def __init__(self, data=None, status=200, invalid_json=False):
+        self.data = data
+        self.status_code = status
+        self.invalid_json = invalid_json
+
+    def json(self):
+        if self.invalid_json:
+            raise ValueError('Invalid JSON')
+        return self.data
+
+
+class RequestsStub:
+    RequestException = ConnectionError
+
+    def __init__(self):
+        self.responses = []
+        self.calls = []
+
+    def get(self, url, **kwargs):
+        self.calls.append((url, kwargs))
+        response = self.responses.pop(0)
+        if isinstance(response, BaseException):
+            raise response
+        return response
+
+
+def current_post(post_id=1, tags=('1girl', 'solo', 'sitting'), url='https://static1.e621.net/a.jpg',
+                 score=5, deleted=False):
+    return {
+        'id': post_id,
+        'tags': list(tags),
+        'rating': 's',
+        'stats': {'score': {'up': score, 'down': 0, 'total': score}},
+        'files': {'original': {'url': url, 'width': 1, 'height': 1}},
+        'flags': {'deleted': deleted},
+    }
+
+
+def legacy_post(post_id=2):
+    return {
+        'id': post_id,
+        'tags': {'general': ['solo', 'sitting'], 'artist': ['some_artist'],
+                 'copyright': ['some_series'], 'character': ['some_char'],
+                 'species': ['wolf'], 'meta': ['hi_res']},
+        'score': {'up': 3, 'down': -1, 'total': 2},
+        'file': {'url': 'https://static1.e621.net/b.jpg'},
+    }
+
+
+class E621AdapterTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        source = Path(__file__).resolve().parents[1] / 'scripts' / 'ranbooru.py'
+        tree = ast.parse(source.read_text(encoding='utf-8'))
+        classes = [n for n in tree.body
+                   if isinstance(n, ast.ClassDef) and n.name in ('Booru', 'e621')]
+        if len(classes) != 2:
+            raise AssertionError('Unable to isolate Booru and e621 classes')
+        cls.module = compile(
+            ast.fix_missing_locations(ast.Module(body=classes, type_ignores=[])),
+            str(source), 'exec')
+
+    def setUp(self):
+        self.requests = RequestsStub()
+        self.pages = []
+
+        def randint(low, high):
+            self.pages.append((low, high))
+            return high
+
+        self.ns = {'requests': self.requests, 'POST_AMOUNT': 100, 'COUNT': 0,
+                   'random': types.SimpleNamespace(randint=randint)}
+        exec(self.module, self.ns)
+        self.adapter = self.ns['e621']()
+
+    def test_current_bare_list(self):
+        self.requests.responses = [Response([current_post()])]
+        posts = self.adapter.get_data('&tags=-animated', 3)['post']
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(posts[0]['tags'], '1girl solo sitting')
+        self.assertEqual(posts[0]['score'], 5)
+        self.assertEqual(posts[0]['file_url'], 'https://static1.e621.net/a.jpg')
+        self.assertEqual(self.ns['COUNT'], 1)
+        self.assertEqual(len(self.requests.calls), 1)
+        url, kwargs = self.requests.calls[0]
+        self.assertIn('&page=3&tags=-animated', url)
+        self.assertEqual(kwargs['timeout'], 20)
+
+    def test_legacy_wrapped_categorised_shape(self):
+        self.requests.responses = [Response({'posts': [legacy_post()]})]
+        post = self.adapter.get_data('', 1)['post'][0]
+        self.assertEqual(post['tags'], 'solo sitting some_artist some_series some_char wolf')
+        self.assertEqual(post['score'], 2)
+        self.assertEqual(post['ranbooru_tag_categories']['species'], ['wolf'])
+
+    def test_skips_deleted_missing_url_and_animated(self):
+        self.requests.responses = [Response([
+            current_post(1, url=None),
+            current_post(2, deleted=True),
+            current_post(3, tags=('animated', 'solo')),
+            'not a post',
+            current_post(4),
+        ])]
+        posts = self.adapter.get_data('', 1)['post']
+        self.assertEqual([p['id'] for p in posts], [4])
+
+    def test_pages_are_one_based_and_capped(self):
+        self.requests.responses = [Response([])] * 3
+        self.adapter.get_data('', 0)
+        self.adapter.get_data('', 10)
+        self.adapter.get_data('', 5000)
+        self.assertEqual(self.pages, [(1, 1), (1, 10), (1, 750)])
+
+    def test_error_object_raises_readable_error(self):
+        self.requests.responses = [Response(
+            {'success': False, 'message': 'You cannot go beyond page 750.'}, status=410)]
+        with self.assertRaisesRegex(RuntimeError, 'HTTP 410.*page 750'):
+            self.adapter.get_data('', 1)
+
+    def test_rate_limit_and_non_json(self):
+        self.requests.responses = [Response({'success': False, 'message': 'slow down'}, status=429)]
+        with self.assertRaisesRegex(RuntimeError, 'Rate limit'):
+            self.adapter.get_data('', 1)
+        self.requests.responses = [Response(invalid_json=True)]
+        with self.assertRaisesRegex(RuntimeError, 'non-JSON'):
+            self.adapter.get_data('', 1)
+
+    def test_network_error(self):
+        self.requests.responses = [ConnectionError('down')]
+        with self.assertRaisesRegex(RuntimeError, 'Unable to contact e621'):
+            self.adapter.get_data('', 1)
+
+
+if __name__ == '__main__':
+    unittest.main()
