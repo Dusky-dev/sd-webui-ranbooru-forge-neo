@@ -138,6 +138,31 @@ class E621AdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, 'Unable to contact e621'):
             self.adapter.get_data('', 1)
 
+    def test_post_id_uses_single_post_endpoint(self):
+        self.requests.responses = [Response(current_post(42))]
+        result = self.adapter.get_post('', 1, ' 42 ')
+        self.assertEqual(result['post'][0]['id'], 42)
+        self.assertEqual(result['post'][0]['tags'], '1girl solo sitting')
+        self.assertEqual(self.requests.calls[0][0], 'https://e621.net/posts/42.json')
+        self.assertEqual(self.ns['COUNT'], 1)
+
+    def test_post_id_errors_name_the_reason(self):
+        with self.assertRaisesRegex(ValueError, 'numbers'):
+            self.adapter.get_post('', 1, '12a')
+        self.assertEqual(self.requests.calls, [])
+        self.requests.responses = [Response({'success': False, 'reason': 'not found'}, status=404)]
+        with self.assertRaisesRegex(RuntimeError, 'post 9 was not found'):
+            self.adapter.get_post('', 1, '9')
+        self.requests.responses = [Response(current_post(4, deleted=True))]
+        with self.assertRaisesRegex(RuntimeError, 'deleted'):
+            self.adapter.get_post('', 1, '4')
+        self.requests.responses = [Response(current_post(5, url=None))]
+        with self.assertRaisesRegex(RuntimeError, 'no image URL'):
+            self.adapter.get_post('', 1, '5')
+        self.requests.responses = [Response(current_post(6, tags=('animated',)))]
+        with self.assertRaisesRegex(RuntimeError, 'animated'):
+            self.adapter.get_post('', 1, '6')
+
     def test_name_tag_lookup_is_chunked_and_cached(self):
         self.ns['e621']._category_cache.clear()
         self.adapter.LOOKUP_CHUNK = 2

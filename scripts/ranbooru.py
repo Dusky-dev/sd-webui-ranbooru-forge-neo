@@ -714,9 +714,6 @@ def check_exception(booru, parameters):
     if booru == 'yande.re' and post_id:
         raise Exception("Yande.re does not support post IDs")
 
-    if booru == 'e621' and post_id:
-        raise Exception("e621 does not support post IDs")
-
     # Danbooru's public search limit is normally two tags. Previously Ranbooru
     # used a slot for its automatic -animated filter, leaving only one for users.
     # The Danbooru adapter now filters animated posts locally instead.
@@ -1604,27 +1601,51 @@ class e621(Booru):
             result = result['posts']
         elif isinstance(result, dict) and isinstance(result.get('post'), dict):
             result = [result['post']]
+        elif isinstance(result, dict) and 'id' in result:
+            # /posts/{id}.json returns a bare post object.
+            result = [result]
         if not isinstance(result, list):
             raise RuntimeError(
                 f'[Ranbooru] e621 API returned invalid data (HTTP {status}).'
             )
         return result
 
-    @classmethod
-    def _normalize_post(cls, post):
-        """Map an e621 post onto the fields before_process reads, or None to skip it."""
-        if not isinstance(post, dict):
-            return None
-        flags = post.get('flags')
-        if isinstance(flags, dict) and flags.get('deleted'):
-            return None
+    @staticmethod
+    def _file_url(post):
         files = post.get('files') or post.get('file') or {}
         original = files.get('original', files) if isinstance(files, dict) else {}
         file_url = original.get('url') if isinstance(original, dict) else None
+        return file_url if isinstance(file_url, str) and file_url else None
+
+    @classmethod
+    def _skip_reason(cls, post):
+        """Why a post can't be used, or None when it can."""
+        if not isinstance(post, dict):
+            return 'malformed post data'
+        flags = post.get('flags')
+        if isinstance(flags, dict) and flags.get('deleted'):
+            return 'the post was deleted'
         # Anonymous requests get no image URL for some posts; skip those so
         # img2img and Deepbooru never fall back to an unrelated picture.
-        if not isinstance(file_url, str) or not file_url:
+        if cls._file_url(post) is None:
+            return 'e621 gives no image URL for it without logging in'
+        tags = post.get('tags')
+        if isinstance(tags, dict):
+            tags = [t for values in tags.values() if isinstance(values, list) for t in values]
+        elif isinstance(tags, str):
+            tags = tags.split()
+        if not isinstance(tags, list):
+            return 'it has no tags'
+        if 'animated' in tags:
+            return 'it is animated'
+        return None
+
+    @classmethod
+    def _normalize_post(cls, post):
+        """Map an e621 post onto the fields before_process reads, or None to skip it."""
+        if cls._skip_reason(post) is not None:
             return None
+        file_url = cls._file_url(post)
 
         tags = post.get('tags')
         if isinstance(tags, dict):
@@ -1645,8 +1666,6 @@ class e621(Booru):
         if not isinstance(tags, list):
             return None
         tags = [tag for tag in tags if isinstance(tag, str) and tag]
-        if 'animated' in tags:
-            return None
 
         stats = post.get('stats') if isinstance(post.get('stats'), dict) else post
         score = stats.get('score', 0)
@@ -1685,11 +1704,30 @@ class e621(Booru):
         return {'post': posts}
 
     def get_post(self, add_tags, max_pages=10, id=''):
-        return self.get_data(
-            add_tags,
-            max_pages,
-            "&id=" + id
-        )
+        global COUNT
+
+        post_id = str(id).strip()
+        if not post_id.isdigit():
+            raise ValueError(
+                f'[Ranbooru] e621 post IDs are numbers; got {post_id!r}.'
+            )
+        try:
+            raw_posts = self._request(f'https://e621.net/posts/{post_id}.json')
+        except RuntimeError as exc:
+            if 'HTTP 404' in str(exc):
+                raise RuntimeError(
+                    f'[Ranbooru] e621 post {post_id} was not found.'
+                ) from exc
+            raise
+        if not raw_posts:
+            raise RuntimeError(f'[Ranbooru] e621 post {post_id} was not found.')
+        reason = self._skip_reason(raw_posts[0])
+        if reason:
+            raise RuntimeError(
+                f'[Ranbooru] e621 post {post_id} cannot be used: {reason}.'
+            )
+        COUNT = 1
+        return {'post': [self._normalize_post(raw_posts[0])]}
 
     # Posts no longer carry tag categories, so look them up: meta, lore and
     # invalid tags never belonged in a prompt (the old adapter skipped those
