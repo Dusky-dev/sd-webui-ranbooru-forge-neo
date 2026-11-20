@@ -328,6 +328,20 @@ class ForgeHarnessTests(unittest.TestCase):
             self.assertIn(len(prompts), (1, batch * n_iter))
             self.assertTrue(all('masterpiece' in prompt for prompt in prompts))
 
+    def test_skip_tags_already_in_prompt(self):
+        script = self.rb.Script()
+        for skip, expect_removed in ((False, False), (True, True)):
+            self.calls.clear()
+            p = self.processing(1, 1)
+            p.prompt = '(blue hair:1.2), <lora:style:0.8>, Smile'
+            with mock.patch.object(self.rb.requests, 'get', side_effect=fake_get), \
+                    mock.patch('sys.stdout', new=io.StringIO()):
+                script.before_process(p, *self.values(skip_prompt_tags=skip))
+            fetched = p.prompt.split('<lora:style:0.8>, Smile', 1)[1]
+            self.assertEqual('blue_hair' not in fetched and 'smile' not in fetched,
+                             expect_removed, fetched)
+            self.assertIn('sitting', fetched)
+
     def test_img2img_every_batch_size_and_count(self):
         for batch, n_iter, last in ((1, 1, False), (2, 1, False), (1, 2, False),
                                     (2, 2, False), (2, 3, True)):

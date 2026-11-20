@@ -14,6 +14,7 @@ from pathlib import Path
 SOURCE = Path(__file__).resolve().parents[1] / 'scripts' / 'ranbooru.py'
 NAMES = {
     '_normalize_pose_tag', 'parse_tag_list', 'remove_listed_tags',
+    'prompt_tag_key', 'prompt_tag_keys',
     'img2img_settings_from', 'source_infotext', 'send_image_to_controlnet',
 }
 
@@ -54,6 +55,30 @@ class TagRemovalTests(unittest.TestCase):
     def test_lone_star_and_empty_entries_remove_nothing(self):
         tags = ['1girl', ' solo', '']
         self.assertEqual(self.ns['remove_listed_tags'](tags, ['*', '', ' ']), ['1girl', ' solo'])
+
+
+class SkipPromptTagsTests(unittest.TestCase):
+    def setUp(self):
+        self.ns = load({'re': re})
+        self.key = self.ns['prompt_tag_key']
+
+    def test_attention_syntax_is_ignored(self):
+        for typed in ('(blue hair:1.2)', 'blue hair', '((Blue_Hair))', '[blue hair]',
+                      '(blue_hair: 0.8)'):
+            self.assertEqual(self.key(typed), 'blue_hair', typed)
+
+    def test_escaped_parentheses_are_part_of_the_name(self):
+        self.assertEqual(self.key(r'hatsune miku \(cosplay\)'), 'hatsune_miku_(cosplay)')
+        self.assertEqual(self.key(r'hatsune_miku_\(cosplay\)'), 'hatsune_miku_(cosplay)')
+
+    def test_extra_networks_and_empty(self):
+        for tag in ('<lora:style:0.7>', '<hypernet:x:1>', '', '  ', '()'):
+            self.assertIsNone(self.key(tag), tag)
+
+    def test_prompt_keys_split_groups(self):
+        keys = self.ns['prompt_tag_keys']('masterpiece, (red eyes, smile:1.1), <lora:a:1>, solo')
+        self.assertEqual(keys, {'masterpiece', 'red_eyes', 'smile', 'solo'})
+        self.assertEqual(self.ns['prompt_tag_keys'](['a', 'b, c']), {'a', 'b', 'c'})
 
 
 @dataclasses.dataclass

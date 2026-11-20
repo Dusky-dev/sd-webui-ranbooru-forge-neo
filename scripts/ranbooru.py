@@ -148,6 +148,7 @@ RANBOORU_STATE_FIELDS = (
     'only_poses',
     'strip_clothing',
     'names_all_boorus',
+    'skip_prompt_tags',
     'save_credentials',
 )
 
@@ -583,6 +584,35 @@ def remove_listed_tags(tags, bad_tags):
             continue
         kept.append(tag)
     return kept
+
+
+def prompt_tag_key(tag):
+    """Compare a prompt tag by its booru name.
+
+    Attention syntax is dropped, `(blue hair:1.2)` and `[blue_hair]` become
+    blue_hair; escaped parentheses are kept, `name \\(series\\)` is
+    name_(series); `<lora:...>` and other extra-network tags give None.
+    """
+    tag = str(tag or '').strip()
+    if not tag or tag.startswith('<'):
+        return None
+    tag = tag.replace('\\(', '\x00').replace('\\)', '\x01')
+    tag = re.sub(r'[()\[\]{}]', '', tag)
+    tag = re.sub(r':\s*-?[\d.]+\s*$', '', tag)
+    tag = tag.replace('\x00', '(').replace('\x01', ')')
+    return _normalize_pose_tag(tag) or None
+
+
+def prompt_tag_keys(prompt):
+    """prompt_tag_key of every comma-separated tag of a prompt (or prompts)."""
+    prompts = prompt if isinstance(prompt, (list, tuple)) else [prompt]
+    keys = set()
+    for text in prompts:
+        for tag in str(text or '').split(','):
+            key = prompt_tag_key(tag)
+            if key:
+                keys.add(key)
+    return keys
 
 
 def _matches_structure(words, nouns, modifiers):
@@ -2350,6 +2380,12 @@ class Script(scripts.Script):
                 value=saved_value('names_all_boorus', False)
             )
 
+            skip_prompt_tags = gr.Checkbox(
+                label="Skip tags already in prompt",
+                info="Leave out fetched tags you already typed, e.g. blue_hair when the prompt has (blue hair:1.2)",
+                value=saved_value('skip_prompt_tags', False)
+            )
+
             change_dash = gr.Checkbox(
                 label='Convert "_" to spaces',
                 value=saved_value('change_dash', False)
@@ -2567,6 +2603,7 @@ class Script(scripts.Script):
             only_poses,
             strip_clothing,
             names_all_boorus,
+            skip_prompt_tags,
             api_key,
             user_id,
             save_credentials,
@@ -2734,6 +2771,7 @@ class Script(scripts.Script):
         only_poses,
         strip_clothing,
         names_all_boorus,
+        skip_prompt_tags,
         api_key,
         user_id,
         save_credentials,
@@ -3195,6 +3233,12 @@ class Script(scripts.Script):
 
             new_prompts = []
 
+            # Tags the user already typed (Skip tags already in prompt).
+            typed_tag_keys = (
+                prompt_tag_keys(self.original_prompt)
+                if skip_prompt_tags else set()
+            )
+
             # Cleaning Tags
             for prompt in prompts:
 
@@ -3202,6 +3246,12 @@ class Script(scripts.Script):
                     html.unescape(prompt).split(','),
                     bad_tags
                 )
+
+                if typed_tag_keys:
+                    prompt_tags = [
+                        tag for tag in prompt_tags
+                        if prompt_tag_key(tag) not in typed_tag_keys
+                    ]
 
                 if e621_dropped_tags:
                     prompt_tags = [
@@ -3372,6 +3422,7 @@ class Script(scripts.Script):
         only_poses,
         strip_clothing,
         names_all_boorus,
+        skip_prompt_tags,
         api_key,
         user_id,
         save_credentials,
