@@ -309,6 +309,24 @@ class AIBooruTests(AdapterTestBase):
                                          'file_url': 'https://cdn/a.png', 'tags': '1girl solo'}])
         self.assertIn('counts/posts.json?tags=1girl', self.requests.calls[0][0])
 
+    def test_post_id(self):
+        post = {'id': 186442, 'tag_string': '1girl solo', 'score': 3,
+                'file_url': 'https://cdn/a.png', 'tag_string_artist': 'someone'}
+        self.requests.responses = [Response(data=post, text='{..}')]
+        data, _ = self.quiet(self.ns['AIBooru']().get_post, '&tags=-animated', 10, ' 186442 ')
+        self.assertEqual(data['post'][0]['tags'], '1girl solo')
+        self.assertEqual(data['post'][0]['tag_string_artist'], 'someone')
+        self.assertEqual(self.requests.calls[0][0], 'https://aibooru.online/posts/186442.json')
+
+    def test_post_id_not_found_and_non_numeric(self):
+        missing = Response(status=404, data={'success': False, 'message': 'That record was not found.'},
+                           text='{"success":false,"message":"That record was not found."}')
+        self.requests.responses = [missing]
+        with self.assertRaisesRegex(ValueError, 'AIBooru post 999 was not found'):
+            self.ns['AIBooru']().get_post('', 10, '999')
+        with self.assertRaisesRegex(ValueError, 'post IDs are numbers'):
+            self.ns['AIBooru']().get_post('', 10, 'abc')
+
     def test_error_page_is_readable(self):
         self.requests.responses = [ConnectionError('down'), Response(status=500, text='<html>oops</html>')]
         with self.assertRaisesRegex(RuntimeError, 'AIBooru API error \\(HTTP 500\\)'):

@@ -16,7 +16,7 @@ To do a basic search you'll need to set the following parameters:
 You can search for a specific post ID by setting the following parameters:
 
 ### Required
-- **Booru**: The booru you want to search on. Every booru except AIBooru supports this.
+- **Booru**: The booru you want to search on. Every booru supports this.
 - **Post ID**: The ID of the post you want to search for. This is the number at the end of the URL of the post. (e.g. `https://danbooru.donmai.us/posts/123456` --> `123456`)
 
 ### Optional

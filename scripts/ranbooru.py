@@ -1710,7 +1710,29 @@ class AIBooru(Booru):
         return {'post': posts}
 
     def get_post(self, add_tags, max_pages=10, id=''):
-        raise Exception("AIBooru does not support post IDs")
+        global COUNT
+
+        post_id = parse_post_id('AIBooru', id)
+        url = f'https://aibooru.online/posts/{post_id}.json'
+        self.last_url = url
+        try:
+            post = fetch_booru_json(url, 'AIBooru', self.headers)
+        except RuntimeError as exc:
+            if '(HTTP 404)' in str(exc):
+                raise ValueError(
+                    f'[Ranbooru] AIBooru post {post_id} was not found.'
+                ) from None
+            raise
+        if not isinstance(post, dict) or not post.get('file_url'):
+            raise ValueError(
+                f'[Ranbooru] AIBooru post {post_id} was not found or has no '
+                'image available.'
+            )
+        # Keep tag_string_artist/character/copyright for Only poses.
+        post['tags'] = post.get('tag_string') or ''
+        post['score'] = post.get('score') or 0
+        COUNT = 1
+        return {'post': [post]}
 
 
 class Danbooru(Booru):
