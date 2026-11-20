@@ -2,10 +2,10 @@
 
 All files under `user/` are **local-only** and ignored by Git, including:
 
-- `user/credentials/credentials.json` (Gelbooru and Rule34 credentials)
+- `user/credentials/credentials.json` (Gelbooru, Rule34 and e621 credentials)
 - `user/last_settings.json` (last used UI controls)
 - `user/booru_recent.json` (recently used boorus)
-- `user/search/*.txt` and `user/remove/*.txt` (custom tag lists)
+- `user/search/*.txt` and `user/remove/*.txt` (tag lists from older versions; no longer used)
 
 These files are created by Ranbooru when needed. Do **not** commit them or publish credential values.
 

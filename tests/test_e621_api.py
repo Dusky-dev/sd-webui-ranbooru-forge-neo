@@ -94,6 +94,23 @@ class E621AdapterTests(unittest.TestCase):
         self.assertIn('&page=3&tags=-animated', url)
         self.assertEqual(kwargs['timeout'], 20)
 
+    def test_anonymous_by_default(self):
+        self.requests.responses = [Response([current_post()])]
+        self.adapter.get_data('', 1)
+        self.assertIsNone(self.requests.calls[0][1]['auth'])
+
+    def test_login_uses_basic_auth_not_the_url(self):
+        adapter = self.ns['e621'](username='fox', api_key='S3CRET')
+        self.requests.responses = [Response([current_post()]),
+                                   Response([{'name': 'solo', 'category': 0}])]
+        adapter.get_data('', 1)
+        adapter.tag_categories(['solo'])
+        for url, kwargs in self.requests.calls:
+            self.assertEqual(kwargs['auth'], ('fox', 'S3CRET'))
+            self.assertNotIn('S3CRET', url)
+        self.assertNotIn('S3CRET', adapter.last_url)
+        self.assertIsNone(self.ns['e621'](username='fox', api_key=' ').auth)
+
     def test_legacy_wrapped_categorised_shape(self):
         self.requests.responses = [Response({'posts': [legacy_post()]})]
         post = self.adapter.get_data('', 1)['post'][0]

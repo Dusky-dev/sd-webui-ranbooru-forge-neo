@@ -3,12 +3,14 @@ import html
 import re
 import random
 import requests
+import copy
+import dataclasses
+from urllib.parse import quote_plus
 import modules.scripts as scripts
 import gradio as gr
 import os
 from PIL import Image
 import numpy as np
-import importlib
 import requests_cache
 import json
 import tempfile
@@ -22,18 +24,13 @@ from modules.processing import (
 )
 
 from modules import shared
-from modules import deepbooru
 from modules.ui_components import InputAccordion
 
 extension_root = scripts.basedir()
 
 user_data_dir = os.path.join(extension_root, 'user')
-user_search_dir = os.path.join(user_data_dir, 'search')
-user_remove_dir = os.path.join(user_data_dir, 'remove')
 user_credentials_dir = os.path.join(user_data_dir, 'credentials')
 
-os.makedirs(user_search_dir, exist_ok=True)
-os.makedirs(user_remove_dir, exist_ok=True)
 os.makedirs(user_credentials_dir, exist_ok=True)
 
 # Initialize credentials manager
@@ -120,7 +117,7 @@ class CredentialsManager:
 
 credentials_manager = CredentialsManager(extension_root)
 
-# Persist user-facing settings only when generating with Ranbooru or LoRAnado enabled.
+# Persist user-facing settings only when generating with Ranbooru enabled.
 # Gelbooru API credentials are managed separately via the opt-in credentials manager.
 RANBOORU_STATE_FILE = os.path.join(user_data_dir, 'last_settings.json')
 RANBOORU_STATE_LOCK = threading.RLock()
@@ -141,31 +138,12 @@ RANBOORU_STATE_FIELDS = (
     'change_color',
     'shuffle_tags',
     'post_id',
-    'mix_prompt',
-    'mix_amount',
-    'chaos_mode',
-    'negative_mode',
-    'chaos_amount',
     'limit_tags',
     'max_tags',
     'sorting_order',
     'mature_rating',
-    'lora_folder',
-    'lora_amount',
-    'lora_min',
-    'lora_max',
-    'lora_enabled',
-    'lora_custom_weights',
-    'lora_lock_prev',
     'use_ip',
-    'use_search_txt',
-    'use_remove_txt',
-    'choose_search_txt',
-    'choose_remove_txt',
     'crop_center',
-    'use_deepbooru',
-    'type_deepbooru',
-    'use_same_seed',
     'use_cache',
     'only_poses',
     'strip_clothing',
@@ -234,7 +212,6 @@ def save_ranbooru_settings(is_img2img, generation_values):
                     os.unlink(temp_path)
                 except OSError:
                     pass
-
 
 
 # Most-recently-used booru order shared by txt2img and img2img.
@@ -352,25 +329,6 @@ def clear_ranbooru_progress_after_postprocess(callback):
             clear_ranbooru_progress()
     return wrapped
 
-
-
-if not os.path.isfile(
-    os.path.join(user_search_dir, 'tags_search.txt')
-):
-    with open(
-        os.path.join(user_search_dir, 'tags_search.txt'),
-        'w'
-    ):
-        pass
-
-if not os.path.isfile(
-    os.path.join(user_remove_dir, 'tags_remove.txt')
-):
-    with open(
-        os.path.join(user_remove_dir, 'tags_remove.txt'),
-        'w'
-    ):
-        pass
 
 COLORED_BG = [
     'black_background',
@@ -596,6 +554,37 @@ def _normalize_pose_tag(tag):
     return '_'.join(tag.split())
 
 
+def parse_tag_list(text):
+    """Split a comma- or newline-separated tag list; trim and drop empties."""
+    return [tag.strip() for tag in re.split(r'[,\n]', str(text or '')) if tag.strip()]
+
+
+def remove_listed_tags(tags, bad_tags):
+    """Drop tags named in bad_tags. `*` makes an entry match any tag that
+    contains the rest of it (`*hair`). Spaces/underscores and case are
+    ignored on both sides."""
+    exact = set()
+    partial = []
+    for bad_tag in bad_tags:
+        norm = _normalize_pose_tag(str(bad_tag))
+        if '*' in norm:
+            norm = norm.replace('*', '').strip('_')
+            if norm:
+                partial.append(norm)
+        elif norm:
+            exact.add(norm)
+
+    kept = []
+    for tag in tags:
+        norm = _normalize_pose_tag(tag)
+        if not norm or norm in exact:
+            continue
+        if any(part in norm for part in partial):
+            continue
+        kept.append(tag)
+    return kept
+
+
 def _matches_structure(words, nouns, modifiers):
     """True when the tag is a noun preceded only by (at least one) modifier."""
     for size in (2, 1):
@@ -751,6 +740,94 @@ RATINGS = {
 }
 
 
+# Generation settings copied from the txt2img run into Ranbooru's img2img pass.
+IMG2IMG_COPIED_SETTINGS = (
+    'prompt', 'negative_prompt', 'styles', 'seed', 'subseed',
+    'subseed_strength', 'seed_resize_from_h', 'seed_resize_from_w',
+    'sampler_name', 'scheduler', 'batch_size', 'n_iter', 'cfg_scale',
+    'distilled_cfg_scale', 'restore_faces', 'tiling', 'override_settings',
+    'override_settings_restore_afterwards',
+)
+
+
+def img2img_settings_from(p, img2img_class):
+    """Settings of p that img2img_class accepts as constructor arguments."""
+    accepted = None
+    if dataclasses.is_dataclass(img2img_class):
+        accepted = {f.name for f in dataclasses.fields(img2img_class) if f.init}
+    return {
+        name: getattr(p, name)
+        for name in IMG2IMG_COPIED_SETTINGS
+        if hasattr(p, name) and (accepted is None or name in accepted)
+    }
+
+
+def source_infotext(infotexts, first_image_index, num):
+    """Infotext of the num-th generated image (a grid, if any, comes first)."""
+    if not infotexts:
+        return ''
+    index = (first_image_index or 0) + num
+    return infotexts[min(index, len(infotexts) - 1)]
+
+
+def send_image_to_controlnet(p, image, weight):
+    """Put a booru image into the first unit of Forge Neo's built-in ControlNet.
+
+    Neo's ControlNet reads its units from p.script_args when it runs
+    process(), after every before_process hook, so the first unit is replaced
+    there. The user picks the model/preprocessor in ControlNet Unit 1; this
+    enables the unit and supplies the image and weight.
+    """
+    runner = getattr(p, 'scripts', None)
+    scripts_list = getattr(runner, 'alwayson_scripts', None) or []
+    controlnet = next(
+        (script for script in scripts_list
+         if str(script.title()).strip().lower() == 'controlnet'),
+        None
+    )
+    if controlnet is None:
+        raise RuntimeError(
+            "[Ranbooru] Send to ControlNet needs Forge Neo's built-in "
+            "ControlNet, which was not found."
+        )
+
+    args = list(p.script_args or ())
+    start, end = controlnet.args_from, controlnet.args_to
+    if start is None or end is None or end <= start or len(args) <= start:
+        raise RuntimeError(
+            '[Ranbooru] Send to ControlNet: no ControlNet unit was found in '
+            'the generation arguments.'
+        )
+
+    pixels = {'image': np.asarray(image.convert('RGB')), 'mask': None}
+    unit = args[start]
+    if isinstance(unit, dict):
+        unit = dict(unit)
+        unit.update(enabled=True, weight=weight, image=pixels,
+                    use_preview_as_input=False)
+        model = unit.get('model', 'None')
+    else:
+        changes = dict(enabled=True, weight=weight, image=pixels,
+                       use_preview_as_input=False)
+        if dataclasses.is_dataclass(unit):
+            unit = dataclasses.replace(unit, **changes)
+        else:
+            unit = copy.copy(unit)
+            for key, value in changes.items():
+                setattr(unit, key, value)
+        model = getattr(unit, 'model', 'None')
+
+    if str(model or 'None') == 'None':
+        print(
+            '[Ranbooru] Send to ControlNet: pick a model in ControlNet '
+            'Unit 1, otherwise the image is ignored.'
+        )
+
+    args[start] = unit
+    p.script_args = type(p.script_args)(args) if isinstance(
+        p.script_args, (list, tuple)) else tuple(args)
+
+
 def get_available_ratings(booru):
     mature_ratings = gr.Radio.update(
         choices=RATINGS[booru].keys(),
@@ -769,14 +846,7 @@ def show_fringe_benefits(booru):
 
 
 def check_exception(booru, parameters):
-    post_id = parameters.get('post_id')
     tags = parameters.get('tags')
-
-    if booru == 'konachan' and post_id:
-        raise Exception("Konachan does not support post IDs")
-
-    if booru == 'yande.re' and post_id:
-        raise Exception("Yande.re does not support post IDs")
 
     # Danbooru's public search limit is normally two tags. Previously Ranbooru
     # used a slot for its automatic -animated filter, leaving only one for users.
@@ -789,6 +859,168 @@ def check_exception(booru, parameters):
                 'anonymous/basic accounts. Remove excess tags, or use '
                 'an account with a higher search-tag limit.'
             )
+
+
+# Booru sites that take an API key plus a user ID (or username) for login.
+CREDENTIAL_BOORUS = {
+    'gelbooru': {
+        'title': 'Gelbooru API Credentials',
+        'key_hint': 'Enter your Gelbooru API key',
+        'user_label': 'User ID',
+        'user_hint': 'Enter your Gelbooru user ID',
+    },
+    'rule34': {
+        'title': 'Rule34 API Credentials',
+        'key_hint': 'Enter your Rule34 API key (My Account > Options on rule34.xxx)',
+        'user_label': 'User ID',
+        'user_hint': 'Enter your Rule34 user ID',
+    },
+    'e621': {
+        'title': 'e621 Login (optional)',
+        'key_hint': 'Enter your e621 API key (Account > Manage API Access)',
+        'user_label': 'Username',
+        'user_hint': 'Enter your e621 username',
+    },
+}
+
+
+def resolve_booru_credentials(booru, api_key, user_id, save_credentials,
+                              manager):
+    """Return (api_key, user_id) for the selected booru, or (None, None).
+
+    Credentials saved for the selected booru win over the textboxes, so a key
+    left in the (hidden) fields for one site is never sent to another.
+    """
+    if booru not in CREDENTIAL_BOORUS:
+        return None, None
+
+    saved = manager.get_booru_credentials(booru)
+    saved_key = str(saved.get('api_key', '') or '').strip()
+    saved_user = str(saved.get('user_id', '') or '').strip()
+    if saved_key and saved_user:
+        return saved_key, saved_user
+
+    key = str(api_key or '').strip()
+    user = str(user_id or '').strip()
+    if key and user:
+        if save_credentials:
+            manager.save_booru_credentials(booru, key, user)
+        return key, user
+
+    return None, None
+
+
+def redact_secrets(text, secrets=()):
+    text = str(text)
+    for secret in secrets:
+        if secret:
+            text = text.replace(str(secret), '***')
+    return text
+
+
+POSTS_COUNT_PATTERN = re.compile(r'<posts\b[^>]*\bcount="(\d+)"')
+XML_REASON_PATTERN = re.compile(
+    r'reason="([^"]*)"|<error>([^<]*)</error>', re.IGNORECASE
+)
+
+
+def fetch_booru_json(url, site, headers=None, auth=None, secrets=()):
+    """GET a booru JSON endpoint and return the decoded body.
+
+    Every failure becomes a RuntimeError that names the site and the reason,
+    with credentials redacted. An empty body is an empty result.
+    """
+    try:
+        response = requests.get(
+            url, headers=headers, auth=auth, timeout=20
+        )
+    except requests.exceptions.RequestException as exc:
+        raise RuntimeError(
+            f'[Ranbooru] Unable to contact {site}: '
+            f'{redact_secrets(exc, secrets)}'
+        ) from exc
+
+    status = getattr(response, 'status_code', 200)
+    text = (getattr(response, 'text', '') or '').strip()
+
+    if 'Missing authentication' in text:
+        raise RuntimeError(
+            f'[Ranbooru] {site} requires an API key and user ID. Enter them '
+            f'in the {site} credentials fields of the Ranbooru panel.'
+        )
+    if status in (401, 403):
+        raise RuntimeError(
+            f'[Ranbooru] {site} rejected the request (HTTP {status}). '
+            f'Check the {site} API key and user ID.'
+        )
+
+    match = XML_REASON_PATTERN.search(text) if text.startswith('<') else None
+    reason = (match.group(1) or match.group(2)).strip() if match else ''
+    if status >= 400:
+        detail = f': {redact_secrets(reason, secrets)}' if reason else ''
+        if status == 429:
+            detail += '. Rate limit reached; retry later'
+        raise RuntimeError(
+            f'[Ranbooru] {site} API error (HTTP {status}){detail}.'
+        )
+    if not text:
+        return []
+    if text.startswith('<'):
+        raise RuntimeError(
+            f'[Ranbooru] {site} API error: '
+            f'{redact_secrets(reason or "unexpected XML/HTML response", secrets)}.'
+        )
+
+    try:
+        data = response.json()
+    except ValueError as exc:
+        raise RuntimeError(
+            f'[Ranbooru] {site} returned a non-JSON response (HTTP {status}).'
+        ) from exc
+
+    if isinstance(data, dict) and data.get('success') is False:
+        message = data.get('message') or data.get('reason') or 'request rejected'
+        raise RuntimeError(
+            f'[Ranbooru] {site} API error: '
+            f'{redact_secrets(message, secrets)}.'
+        )
+    if isinstance(data, str):
+        raise RuntimeError(
+            f'[Ranbooru] {site} API error: {redact_secrets(data, secrets)}'
+        )
+    return data
+
+
+def fetch_xml_count(url, headers=None):
+    """Return the result count from an XML `<posts count=...>` reply, or None.
+
+    Used only to pick a page in range, so any failure is soft.
+    """
+    try:
+        response = requests.get(url, headers=headers, timeout=20)
+        match = POSTS_COUNT_PATTERN.search(getattr(response, 'text', '') or '')
+    except (requests.exceptions.RequestException, AttributeError, TypeError):
+        return None
+    return int(match.group(1)) if match else None
+
+
+def pages_for_count(count, max_pages, page_limit=None):
+    """Number of pages worth sampling: Max Pages, capped by results and site."""
+    pages = max(1, int(max_pages or 1))
+    if count is not None:
+        pages = min(pages, max(1, -(-int(count) // POST_AMOUNT)))
+    if page_limit:
+        pages = min(pages, page_limit)
+    return pages
+
+
+def parse_post_id(site, post_id):
+    post_id = str(post_id or '').strip()
+    if not post_id.isdigit():
+        raise ValueError(
+            f'[Ranbooru] {site} post IDs are numbers; got {post_id!r}.'
+        )
+    return post_id
 
 
 class Booru:
@@ -1043,445 +1275,261 @@ class Gelbooru(Booru):
         return self.get_data(add_tags, max_pages, '&id=' + str(id))
 
 
-class XBooru(Booru):
+class GelbooruBeta(Booru):
+    """Gelbooru 0.2 dapi sites (XBooru, Safebooru, Rule34)."""
+
+    # The dapi refuses offsets past pid 2000 at 100 posts per page
+    # ("Search error: API limited due to abuse.").
+    MAX_PID = 2000
+
+    def __init__(self, booru, base_url, image_host):
+        super().__init__(
+            booru,
+            f'{base_url}?page=dapi&s=post&q=index&json=1&limit={POST_AMOUNT}'
+        )
+        self.base_url = base_url
+        self.image_host = image_host
+
+    def _auth_params(self):
+        return ''
+
+    def _secrets(self):
+        return ()
+
+    def _get(self, url):
+        self.last_url = redact_secrets(url, self._secrets())
+        print(f'{self.booru} URL: {self.last_url}')
+        return fetch_booru_json(
+            url, self.booru, self.headers, secrets=self._secrets()
+        )
+
+    def _normalize(self, data):
+        if data is None:
+            return []
+        if not isinstance(data, list):
+            raise RuntimeError(
+                f'[Ranbooru] {self.booru} returned an unexpected '
+                f'{type(data).__name__} instead of a post list.'
+            )
+        posts = []
+        for post in data:
+            if not isinstance(post, dict):
+                continue
+            file_url = str(post.get('file_url') or '')
+            if not file_url.startswith('http') or file_url.endswith('/'):
+                # A missing post ID still returns one row with a null image
+                # and a file_url ending in "/".
+                if not (post.get('image') and post.get('directory')):
+                    continue
+                file_url = (
+                    f"{self.image_host}/{post['directory']}/{post['image']}"
+                )
+            post['file_url'] = file_url
+            post['score'] = post.get('score') or 0
+            post['tags'] = post.get('tags') or ''
+            posts.append(post)
+        return posts
+
+    def get_data(self, add_tags, max_pages=10, id=''):
+        global COUNT
+
+        auth = self._auth_params()
+        count = fetch_xml_count(
+            f'{self.base_url}?page=dapi&s=post&q=index&limit=0'
+            f'{add_tags}{auth}',
+            self.headers
+        )
+        if count == 0:
+            COUNT = 0
+            return {'post': []}
+
+        pages = pages_for_count(count, max_pages, self.MAX_PID + 1)
+        pid = random.randint(0, pages - 1)
+        posts = self._normalize(
+            self._get(f'{self.booru_url}&pid={pid}{add_tags}{auth}')
+        )
+        COUNT = count if count is not None else len(posts)
+        print(f' Processing page {pid + 1} of {pages} ({COUNT} results).')
+        return {'post': posts}
+
+    def get_post(self, add_tags, max_pages=10, id=''):
+        global COUNT
+
+        post_id = parse_post_id(self.booru, id)
+        posts = self._normalize(
+            self._get(f'{self.booru_url}&id={post_id}{self._auth_params()}')
+        )
+        if not posts:
+            raise ValueError(
+                f'[Ranbooru] {self.booru} post {post_id} was not found.'
+            )
+        COUNT = len(posts)
+        return {'post': posts}
+
+
+class XBooru(GelbooruBeta):
     def __init__(self):
         super().__init__(
             'xbooru',
-            (
-                'https://xbooru.com/index.php'
-                '?page=dapi&s=post&q=index'
-                f'&json=1&limit={POST_AMOUNT}'
-            )
-        )
-
-    def get_data(self, add_tags, max_pages=10, id=''):
-        global COUNT
-
-        loop_msg = True
-
-        # run loop at most twice
-        for loop in range(2):
-
-            if id:
-                add_tags = ''
-
-            url = (
-                f"{self.booru_url}"
-                f"&pid={random.randint(0, max_pages - 1)}"
-                f"{id}{add_tags}"
-            )
-
-            print(url)
-
-            self.last_url = url
-
-            res = requests.get(url)
-            data = res.json()
-
-            COUNT = 0
-
-            for post in data:
-                post['file_url'] = (
-                    f"https://xbooru.com/images/"
-                    f"{post['directory']}/{post['image']}"
-                )
-
-                COUNT += 1
-
-            if COUNT <= max_pages * POST_AMOUNT:
-                max_pages = COUNT // POST_AMOUNT + 1
-
-                # If max_pages is bigger than available pages,
-                # loop the function with updated max_pages
-                # based on the value of COUNT
-                while loop_msg:
-                    print(f" Processing {COUNT} results.")
-                    loop_msg = False
-                    continue
-
-            else:
-                print(
-                    f" Processing "
-                    f"{max_pages * POST_AMOUNT} "
-                    f"out of {COUNT} results."
-                )
-
-                break
-
-        return {'post': data}
-
-    def get_post(self, add_tags, max_pages=10, id=''):
-        return self.get_data(
-            add_tags,
-            max_pages,
-            "&id=" + id
+            'https://xbooru.com/index.php',
+            'https://xbooru.com/images'
         )
 
 
-class Rule34(Booru):
-    def __init__(self, username=None, api_key=None):
-        super().__init__(
-            'rule34',
-            (
-                'https://api.rule34.xxx/index.php'
-                '?page=dapi&s=post&q=index'
-                f'&json=1&limit={POST_AMOUNT}'
-            )
-        )
-
-        self.username = username
-        self.api_key = api_key
-
-        self.headers = {
-            "User-Agent": "Ranbooru/1.2"
-        }
-
-    def get_data(self, add_tags, max_pages=10, id=''):
-        global COUNT
-
-        loop_msg = True
-
-        for loop in range(2):
-
-            if id:
-                add_tags = ''
-
-            api_params = (
-                f"&pid={random.randint(0, max_pages - 1)}"
-                f"{id}{add_tags}"
-            )
-
-            # Add Rule34 credentials if available
-            if self.api_key and self.username:
-                api_params += (
-                    f"&api_key={self.api_key}"
-                    f"&user_id={self.username}"
-                )
-
-            url = f"{self.booru_url}{api_params}"
-
-            self.last_url = url
-
-            print(f"Rule34 URL: {url}")
-
-            try:
-                res = requests.get(
-                    url,
-                    headers=self.headers,
-                    timeout=20
-                )
-
-                res.raise_for_status()
-
-            except requests.exceptions.RequestException as e:
-                print(f"Rule34 request failed: {e}")
-                return {'post': []}
-
-            response_text = res.text.strip()
-
-            if "Missing authentication" in response_text:
-                print("Rule34 authentication required")
-                return {'post': []}
-
-            try:
-                data = res.json()
-
-            except Exception as e:
-                print(f"Rule34 returned invalid JSON: {e}")
-                print(response_text[:500])
-                return {'post': []}
-
-            if isinstance(data, str):
-                print(f"Rule34 returned string response: {data}")
-                return {'post': []}
-
-            if data is None:
-                print("Rule34 returned null response")
-                return {'post': []}
-
-            if not isinstance(data, list):
-                print(
-                    f"Unexpected Rule34 response type: "
-                    f"{type(data)}"
-                )
-
-                print(data)
-                return {'post': []}
-
-            clean_posts = []
-
-            for post in data:
-
-                if not isinstance(post, dict):
-                    continue
-
-                post['score'] = post.get('score', 0)
-
-                if 'tags' not in post:
-                    post['tags'] = ''
-
-                if 'file_url' not in post:
-                    continue
-
-                clean_posts.append(post)
-
-            data = clean_posts
-
-            COUNT = len(data)
-
-            if COUNT == 0:
-                max_pages = 2
-
-                while loop_msg:
-                    print(f"Processing {COUNT} results.")
-                    loop_msg = False
-                    continue
-
-            else:
-                print(f"Found {COUNT} valid results")
-                break
-
-        return {'post': data}
-
-    def get_post(self, add_tags, max_pages=10, id=''):
-        return self.get_data(
-            add_tags,
-            max_pages,
-            "&id=" + id
-        )
-
-
-class Safebooru(Booru):
+class Safebooru(GelbooruBeta):
     def __init__(self):
         super().__init__(
             'safebooru',
-            (
-                'https://safebooru.org/index.php'
-                '?page=dapi&s=post&q=index'
-                f'&json=1&limit={POST_AMOUNT}'
-            )
+            'https://safebooru.org/index.php',
+            'https://safebooru.org/images'
         )
+
+
+class Rule34(GelbooruBeta):
+    def __init__(self, username=None, api_key=None):
+        super().__init__(
+            'rule34',
+            'https://api.rule34.xxx/index.php',
+            'https://api-cdn.rule34.xxx/images'
+        )
+        self.username = (username or '').strip()
+        self.api_key = (api_key or '').strip()
+        self.headers['user-agent'] = 'Ranbooru/1.2'
+
+    def _auth_params(self):
+        if self.api_key and self.username:
+            return (
+                f'&api_key={quote_plus(self.api_key)}'
+                f'&user_id={quote_plus(self.username)}'
+            )
+        return ''
+
+    def _secrets(self):
+        return tuple(
+            secret for secret in (self.api_key, quote_plus(self.api_key))
+            if secret
+        )
+
+
+class Moebooru(Booru):
+    """Moebooru sites (Konachan, Yande.re). Pages are 1-based."""
+
+    def __init__(self, booru, base_url):
+        super().__init__(booru, f'{base_url}/post.json?limit={POST_AMOUNT}')
+        self.base_url = base_url
+
+    def _get(self, url):
+        self.last_url = url
+        print(f'{self.booru} URL: {url}')
+        data = fetch_booru_json(url, self.booru, self.headers)
+        if not isinstance(data, list):
+            raise RuntimeError(
+                f'[Ranbooru] {self.booru} returned an unexpected '
+                f'{type(data).__name__} instead of a post list.'
+            )
+        posts = []
+        for post in data:
+            if not isinstance(post, dict) or not post.get('file_url'):
+                continue
+            post['score'] = post.get('score') or 0
+            post['tags'] = post.get('tags') or ''
+            posts.append(post)
+        return posts
 
     def get_data(self, add_tags, max_pages=10, id=''):
         global COUNT
 
-        loop_msg = True
-
-        # run loop at most twice
-        for loop in range(2):
-
-            if id:
-                add_tags = ''
-
-            url = (
-                f"{self.booru_url}"
-                f"&pid={random.randint(0, max_pages - 1)}"
-                f"{id}{add_tags}"
-            )
-
-            self.last_url = url
-
-            res = requests.get(url)
-            data = res.json()
-
+        count = fetch_xml_count(
+            f'{self.base_url}/post.xml?limit=1{add_tags}', self.headers
+        )
+        if count == 0:
             COUNT = 0
+            return {'post': []}
 
-            for post in data:
-                post['file_url'] = (
-                    f"https://safebooru.org/images/"
-                    f"{post['directory']}/{post['image']}"
-                )
-
-                COUNT += 1
-
-            if COUNT <= max_pages * POST_AMOUNT:
-                max_pages = COUNT // POST_AMOUNT + 1
-
-                # If max_pages is bigger than available pages,
-                # loop the function with updated max_pages
-                # based on the value of COUNT
-                while loop_msg:
-                    print(f" Processing {COUNT} results.")
-                    loop_msg = False
-                    continue
-
-            else:
-                print(
-                    f" Processing "
-                    f"{max_pages * POST_AMOUNT} "
-                    f"out of {COUNT} results."
-                )
-
-                break
-
-        return {'post': data}
+        pages = pages_for_count(count, max_pages)
+        page = random.randint(1, pages)
+        posts = self._get(f'{self.booru_url}&page={page}{add_tags}')
+        COUNT = count if count is not None else len(posts)
+        print(f' Processing page {page} of {pages} ({COUNT} results).')
+        return {'post': posts}
 
     def get_post(self, add_tags, max_pages=10, id=''):
-        return self.get_data(
-            add_tags,
-            max_pages,
-            "&id=" + id
-        )
-class Konachan(Booru):
-    def __init__(self):
-        super().__init__(
-            'konachan',
-            f'https://konachan.com/post.json?limit={POST_AMOUNT}'
-        )
-
-    def get_data(self, add_tags, max_pages=10, id=''):
         global COUNT
 
-        loop_msg = True
-
-        # run loop at most twice
-        for loop in range(2):
-
-            if id:
-                add_tags = ''
-
-            url = (
-                f"{self.booru_url}"
-                f"&page={random.randint(0, max_pages - 1)}"
-                f"{id}{add_tags}"
+        post_id = parse_post_id(self.booru, id)
+        posts = self._get(f'{self.booru_url}&tags=id:{post_id}')
+        if not posts:
+            raise ValueError(
+                f'[Ranbooru] {self.booru} post {post_id} was not found.'
             )
-
-            self.last_url = url
-
-            res = requests.get(url)
-            data = res.json()
-
-            COUNT = len(data)
-
-            if COUNT == 0:
-                max_pages = 2
-
-                # Konachan does not have a way to know
-                # the amount of results available in the search,
-                # so we need to run the function again
-                # with a fixed amount of pages
-
-                while loop_msg:
-                    print(f" Processing {COUNT} results.")
-                    loop_msg = False
-                    continue
-
-            else:
-                print("Found enough results")
-                break
-
-        return {'post': data}
-
-    def get_post(self, add_tags, max_pages=10, id=''):
-        raise Exception("Konachan does not support post IDs")
+        COUNT = len(posts)
+        return {'post': posts}
 
 
-class Yandere(Booru):
+class Konachan(Moebooru):
     def __init__(self):
-        super().__init__(
-            'yande.re',
-            f'https://yande.re/post.json?limit={POST_AMOUNT}'
-        )
+        super().__init__('konachan', 'https://konachan.com')
 
-    def get_data(self, add_tags, max_pages=10, id=''):
-        global COUNT
 
-        loop_msg = True
-
-        # run loop at most twice
-        for loop in range(2):
-
-            if id:
-                add_tags = ''
-
-            url = (
-                f"{self.booru_url}"
-                f"&page={random.randint(0, max_pages - 1)}"
-                f"{id}{add_tags}"
-            )
-
-            self.last_url = url
-
-            res = requests.get(url)
-            data = res.json()
-
-            COUNT = len(data)
-
-            if COUNT == 0:
-                max_pages = 2
-
-                # Yandere does not have a way to know
-                # the amount of results available in the search,
-                # so we need to run the function again
-                # with a fixed amount of pages
-
-                while loop_msg:
-                    print(f" Processing {COUNT} results.")
-                    loop_msg = False
-                    continue
-
-            else:
-                print("Found enough results")
-                break
-
-        return {'post': data}
-
-    def get_post(self, add_tags, max_pages=10, id=''):
-        raise Exception("Yande.re does not support post IDs")
+class Yandere(Moebooru):
+    def __init__(self):
+        super().__init__('yande.re', 'https://yande.re')
 
 
 class AIBooru(Booru):
+    # Danbooru-based: pages are 1-based and capped at 1000 (HTTP 410 beyond).
+    MAX_PAGE = 1000
+
     def __init__(self):
         super().__init__(
             'AIBooru',
             f'https://aibooru.online/posts.json?limit={POST_AMOUNT}'
         )
 
+    def _count(self, add_tags):
+        try:
+            response = requests.get(
+                'https://aibooru.online/counts/posts.json?'
+                + add_tags.lstrip('&'),
+                headers=self.headers,
+                timeout=20
+            )
+            count = response.json()['counts']['posts']
+        except (requests.exceptions.RequestException, ValueError,
+                KeyError, TypeError, AttributeError):
+            return None
+        return count if isinstance(count, int) else None
+
     def get_data(self, add_tags, max_pages=10, id=''):
         global COUNT
 
-        loop_msg = True
+        count = self._count(add_tags)
+        if count == 0:
+            COUNT = 0
+            return {'post': []}
 
-        # run loop at most twice
-        for loop in range(2):
-
-            if id:
-                add_tags = ''
-
-            url = (
-                f"{self.booru_url}"
-                f"&page={random.randint(0, max_pages - 1)}"
-                f"{id}{add_tags}"
+        pages = pages_for_count(count, max_pages, self.MAX_PAGE)
+        page = random.randint(1, pages)
+        url = f'{self.booru_url}&page={page}{add_tags}'
+        self.last_url = url
+        print(f'AIBooru URL: {url}')
+        data = fetch_booru_json(url, 'AIBooru', self.headers)
+        if not isinstance(data, list):
+            raise RuntimeError(
+                f'[Ranbooru] AIBooru returned an unexpected '
+                f'{type(data).__name__} instead of a post list.'
             )
-
-            self.last_url = url
-
-            res = requests.get(url)
-            data = res.json()
-
-            for post in data:
-                post['tags'] = post['tag_string']
-
-            COUNT = len(data)
-
-            if COUNT == 0:
-                max_pages = 2
-
-                # AIBooru does not have a way to know
-                # the amount of results available in the search,
-                # so we need to run the function again
-                # with a fixed amount of pages
-
-                while loop_msg:
-                    print(f" Processing {COUNT} results.")
-                    loop_msg = False
-                    continue
-
-            else:
-                print("Found enough results")
-                break
-
-        return {'post': data}
+        posts = []
+        for post in data:
+            # Danbooru-based sites omit file_url on posts hidden from guests.
+            if not isinstance(post, dict) or not post.get('file_url'):
+                continue
+            post['tags'] = post.get('tag_string') or ''
+            post['score'] = post.get('score') or 0
+            posts.append(post)
+        COUNT = count if count is not None else len(posts)
+        print(f' Processing page {page} of {pages} ({COUNT} results).')
+        return {'post': posts}
 
     def get_post(self, add_tags, max_pages=10, id=''):
         raise Exception("AIBooru does not support post IDs")
@@ -1631,13 +1679,18 @@ class e621(Booru):
     MAX_PAGE = 750
     TAG_CATEGORIES = ('general', 'artist', 'copyright', 'character', 'species')
 
-    def __init__(self):
+    def __init__(self, username=None, api_key=None):
         super().__init__(
             'e621',
             f'https://e621.net/posts.json?limit={POST_AMOUNT}'
         )
         # e621 asks API clients for a descriptive User-Agent.
         self.headers['user-agent'] = 'Ranbooru-Forge-Neo/1.0 (tag prompt extension)'
+        # Optional login: HTTP Basic auth with username and API key, never
+        # part of the URL.
+        username = (username or '').strip()
+        api_key = (api_key or '').strip()
+        self.auth = (username, api_key) if username and api_key else None
 
     @staticmethod
     def _read_api_json(response):
@@ -1656,6 +1709,8 @@ class e621(Booru):
             message = result.get('message') or result.get('reason') or 'request rejected'
             if status == 429:
                 message += '. Rate limit reached; retry later.'
+            elif status == 401:
+                message += '. Check the e621 username and API key.'
             raise RuntimeError(f'[Ranbooru] e621 API error (HTTP {status}): {message}')
         if status >= 400:
             raise RuntimeError(f'[Ranbooru] e621 API error (HTTP {status}).')
@@ -1690,7 +1745,7 @@ class e621(Booru):
         if isinstance(flags, dict) and flags.get('deleted'):
             return 'the post was deleted'
         # Anonymous requests get no image URL for some posts; skip those so
-        # img2img and Deepbooru never fall back to an unrelated picture.
+        # img2img never falls back to an unrelated picture.
         if cls._file_url(post) is None:
             return 'e621 gives no image URL for it without logging in'
         tags = post.get('tags')
@@ -1746,7 +1801,7 @@ class e621(Booru):
     def _request(self, url):
         self.last_url = url
         try:
-            response = requests.get(url, headers=self.headers, timeout=20)
+            response = requests.get(url, headers=self.headers, auth=self.auth, timeout=20)
         except requests.RequestException as exc:
             raise RuntimeError(f'[Ranbooru] Unable to contact e621: {exc}') from exc
         return self._read_api_json(response)
@@ -1820,7 +1875,7 @@ class e621(Booru):
             chunk = missing[start:start + self.LOOKUP_CHUNK]
             url = self.TAGS_URL + quote(','.join(chunk), safe=',')
             try:
-                response = requests.get(url, headers=self.headers, timeout=20)
+                response = requests.get(url, headers=self.headers, auth=self.auth, timeout=20)
                 rows = response.json() if response.status_code == 200 else None
             except (requests.RequestException, ValueError) as exc:
                 rows = None
@@ -1835,26 +1890,6 @@ class e621(Booru):
             for tag in chunk:
                 cache.setdefault(tag, None)
         return {t: cache.get(t) for t in set(tags)}
-
-
-def generate_chaos(pos_tags, neg_tags, chaos_amount):
-    """Generates chaos in the prompt by adding random tags from the prompt to the positive and negative prompts"""
-
-    chaos_list = [tag for tag in pos_tags.split(',') + neg_tags.split(',') if tag.strip() != '']
-    chaos_list = list(set(chaos_list))
-    random.shuffle(chaos_list)
-
-    len_list = round(len(chaos_list) * chaos_amount)
-
-    pos_list = chaos_list[len_list:]
-    neg_list = chaos_list[:len_list]
-
-    random.shuffle(neg_list)
-
-    pos_prompt = ', '.join(pos_list)
-    neg_prompt = ', '.join(neg_list)
-
-    return pos_prompt, neg_prompt
 
 
 def resize_image(img, width, height, cropping=True):
@@ -1932,44 +1967,6 @@ def resize_image(img, width, height, cropping=True):
         img = img.resize((width, height))
 
     return img
-def modify_prompt(prompt, tagged_prompt, type_deepbooru):
-    """
-    Modifies the prompt based on the type_deepbooru selected
-
-    Args:
-        prompt (str): the prompt
-        tagged_prompt (str): the prompt tagged by deepbooru
-        type_deepbooru (str): the type of modification
-
-    Returns:
-        str: the modified prompt
-    """
-
-    if type_deepbooru == 'Add Before':
-        return tagged_prompt + ',' + prompt
-
-    elif type_deepbooru == 'Add After':
-        return prompt + ',' + tagged_prompt
-
-    elif type_deepbooru == 'Replace':
-        return tagged_prompt
-
-    return prompt
-
-
-def remove_repeated_tags(prompt):
-    """Removes repeated tags while keeping order"""
-
-    prompt = prompt.split(',')
-
-    new_prompt = []
-
-    for tag in prompt:
-        tag = tag.strip()
-        if tag and tag not in new_prompt:
-            new_prompt.append(tag)
-
-    return ', '.join(new_prompt)
 
 
 def limit_prompt_tags(prompt, limit_tags, mode):
@@ -1999,32 +1996,11 @@ def normalize_prompt(prompt):
 
 class Script(scripts.Script):
 
-    previous_loras = ''
     last_img = []
     real_steps = 0
     version = "1.2"
     original_prompt = ''
 
-    def get_files(self, path):
-        files = []
-
-        for file in os.listdir(path):
-            if file.endswith('.txt'):
-                files.append(file)
-
-        return files
-
-    def hide_object(self, obj, booru):
-        print(f'hide_object: {obj}, {booru.value}')
-
-        if (
-            booru.value == 'konachan'
-            or booru.value == 'yande.re'
-        ):
-            obj.interactive = False
-
-        else:
-            obj.interactive = True
 
     def title(self):
         return "Ranbooru"
@@ -2032,148 +2008,65 @@ class Script(scripts.Script):
     def show(self, is_img2img):
         return scripts.AlwaysVisible
 
-    def show_gelbooru_api_fields(self, booru):
-        return gr.update(
-            visible=(booru == 'gelbooru')
-        )
+    def booru_credential_updates(self, booru, cleared=False):
+        """Gradio updates for the credentials group of the selected booru.
 
-    def load_gelbooru_credentials(self, booru):
-        """Load saved credentials for Gelbooru"""
-
-        if booru != 'gelbooru':
+        Outputs: group, heading, api_key, user_id, status, clear button.
+        The textboxes are always emptied: saved credentials are read from disk
+        at generation time, so no key stays in the page for another site.
+        """
+        spec = CREDENTIAL_BOORUS.get(booru)
+        if spec is None:
             return (
+                gr.update(visible=False),
+                gr.update(),
                 gr.update(visible=False, value=""),
                 gr.update(visible=False, value=""),
                 gr.update(visible=False, value=""),
                 gr.update(visible=False)
             )
 
-        credentials = (
-            credentials_manager.get_booru_credentials(
-                'gelbooru'
-            )
+        saved = (
+            {} if cleared
+            else credentials_manager.get_booru_credentials(booru)
         )
-
-        api_key = credentials.get('api_key', '')
-        user_id = credentials.get('user_id', '')
-
-        has_saved_creds = (
-            api_key.strip() != ''
-            and user_id.strip() != ''
-        )
-
-        if has_saved_creds:
-
-            status_text = (
-                f"✓ Credentials loaded from: "
-                f"{credentials_manager.credentials_file}"
-            )
-
-            return (
-                gr.update(
-                    visible=False,
-                    value=api_key
-                ),
-
-                gr.update(
-                    visible=False,
-                    value=user_id
-                ),
-
-                gr.update(
-                    visible=True,
-                    value=status_text
-                ),
-
-                gr.update(visible=True)
-            )
-
-        return (
-            gr.update(
-                visible=True,
-                value=""
-            ),
-
-            gr.update(
-                visible=True,
-                value=""
-            ),
-
-            gr.update(
-                visible=False,
-                value=""
-            ),
-
-            gr.update(visible=False)
-        )
-
-    def clear_gelbooru_credentials(self):
-        """Clear saved Gelbooru credentials"""
-
-        credentials_manager.clear_booru_credentials(
-            'gelbooru'
+        api_key = str(saved.get('api_key', '') or '').strip()
+        user_id = str(saved.get('user_id', '') or '').strip()
+        has_saved = bool(api_key and user_id)
+        status_text = (
+            f"✓ Credentials loaded from: "
+            f"{credentials_manager.credentials_file}"
+            if has_saved else ""
         )
 
         return (
+            gr.update(visible=True),
+            gr.update(value=f"### {spec['title']}"),
             gr.update(
-                visible=True,
-                value=""
-            ),  # api_key field
-
+                visible=not has_saved,
+                value="",
+                placeholder=spec['key_hint']
+            ),
             gr.update(
-                visible=True,
-                value=""
-            ),  # user_id field
-
-            gr.update(
-                visible=False,
-                value=""
-            ),  # credentials_status
-
-            gr.update(visible=False)
+                visible=not has_saved,
+                value="",
+                label=spec['user_label'],
+                placeholder=spec['user_hint']
+            ),
+            gr.update(visible=has_saved, value=status_text),
+            gr.update(visible=has_saved)
         )
 
-    def save_gelbooru_credentials(
-        self,
-        booru,
-        api_key,
-        user_id,
-        save_credentials
-    ):
-        """Save Gelbooru credentials if checkbox is checked"""
+    def load_booru_credentials(self, booru):
+        """Show the saved credentials state for the selected booru."""
+        return self.booru_credential_updates(booru)
 
-        if (
-            booru == 'gelbooru'
-            and save_credentials
-            and api_key.strip()
-            and user_id.strip()
-        ):
+    def clear_booru_credentials(self, booru):
+        """Clear saved credentials for the selected booru."""
+        if booru in CREDENTIAL_BOORUS:
+            credentials_manager.clear_booru_credentials(booru)
+        return self.booru_credential_updates(booru, cleared=True)
 
-            credentials_manager.save_booru_credentials(
-                'gelbooru',
-                api_key.strip(),
-                user_id.strip()
-            )
-
-            return "✓ Credentials saved"
-
-        elif (
-            booru == 'gelbooru'
-            and not save_credentials
-        ):
-            return "Credentials will not be saved"
-
-        return ""
-
-    def refresh_ser(self):
-        return gr.update(
-            choices=self.get_files(user_search_dir)
-        )
-
-    def refresh_rem(self):
-        return gr.update(
-            choices=self.get_files(user_remove_dir)
-        )
 
     def ui(self, is_img2img):
         self._ranbooru_is_img2img = is_img2img
@@ -2204,17 +2097,20 @@ class Script(scripts.Script):
         selected_booru = saved_choice('booru', 'safebooru', RATINGS)
         available_ratings = list(RATINGS[selected_booru])
 
-        # Determine initial Gelbooru credential visibility
-        has_saved = credentials_manager.has_credentials(
-            'gelbooru'
+        # Initial credential state for the selected booru (if it takes one)
+        credential_spec = CREDENTIAL_BOORUS.get(
+            selected_booru, CREDENTIAL_BOORUS['gelbooru']
         )
-
         saved_creds = (
-            credentials_manager.get_booru_credentials(
-                'gelbooru'
-            )
-            if has_saved else {}
+            credentials_manager.get_booru_credentials(selected_booru)
+            if selected_booru in CREDENTIAL_BOORUS else {}
         )
+        has_saved = bool(
+            str(saved_creds.get('api_key', '') or '').strip()
+            and str(saved_creds.get('user_id', '') or '').strip()
+        )
+        if not has_saved:
+            saved_creds = {}
 
         initial_api_key_visible = not has_saved
         initial_user_id_visible = not has_saved
@@ -2322,38 +2218,30 @@ class Script(scripts.Script):
                 visible=(selected_booru == 'gelbooru')
             )
 
-            # API credentials for Gelbooru
-            with gr.Group(visible=(selected_booru == 'gelbooru')) as gelbooru_credentials_group:
+            # API credentials for boorus that take a key and user ID
+            with gr.Group(
+                visible=(selected_booru in CREDENTIAL_BOORUS)
+            ) as credentials_group:
 
-                gr.Markdown(
-                    "### Gelbooru API Credentials"
+                credentials_heading = gr.Markdown(
+                    f"### {credential_spec['title']}"
                 )
 
                 api_key = gr.Textbox(
                     lines=1,
                     label="API Key",
-                    placeholder=(
-                        "Enter your Gelbooru API key"
-                    ),
+                    placeholder=credential_spec['key_hint'],
                     type="password",
                     visible=initial_api_key_visible,
-                    value=saved_creds.get(
-                        'api_key',
-                        ''
-                    )
+                    value=""
                 )
 
                 user_id = gr.Textbox(
                     lines=1,
-                    label="User ID",
-                    placeholder=(
-                        "Enter your Gelbooru user ID"
-                    ),
+                    label=credential_spec['user_label'],
+                    placeholder=credential_spec['user_hint'],
                     visible=initial_user_id_visible,
-                    value=saved_creds.get(
-                        'user_id',
-                        ''
-                    )
+                    value=""
                 )
 
                 save_credentials = gr.Checkbox(
@@ -2439,14 +2327,6 @@ class Script(scripts.Script):
                 fringe_benefits
             )
 
-            # show/hide gelbooru credentials group
-
-            booru.input(
-                self.show_gelbooru_api_fields,
-                inputs=[booru],
-                outputs=[gelbooru_credentials_group]
-            )
-
             gr.Markdown("""\n---\n""")
             with gr.Group():
 
@@ -2480,208 +2360,33 @@ class Script(scripts.Script):
                         value=saved_value('crop_center', False)
                     )
 
-                    use_deepbooru = gr.Checkbox(
-                        label="Use Deepbooru",
-                        value=saved_value('use_deepbooru', False)
-                    )
-
-                    type_deepbooru = gr.Radio(
-                        [
-                            "Add Before",
-                            "Add After",
-                            "Replace"
-                        ],
-
-                        label="Deepbooru Tags Position",
-                        value=saved_choice('type_deepbooru', 'Add Before', ['Add Before', 'Add After', 'Replace'])
-                    )
-
-            with gr.Group():
-
-                with gr.Accordion("File", open=False):
-
-                    use_search_txt = gr.Checkbox(
-                        label="Use tags_search.txt",
-                        value=saved_value('use_search_txt', False)
-                    )
-
-                    choose_search_txt = gr.Dropdown(
-                        self.get_files(user_search_dir),
-                        label="Choose tags_search.txt",
-                        value=saved_choice('choose_search_txt', "", self.get_files(user_search_dir))
-                    )
-
-                    search_refresh_btn = gr.Button(
-                        "Refresh"
-                    )
-
-                    use_remove_txt = gr.Checkbox(
-                        label="Use tags_remove.txt",
-                        value=saved_value('use_remove_txt', False)
-                    )
-
-                    choose_remove_txt = gr.Dropdown(
-                        self.get_files(user_remove_dir),
-                        label="Choose tags_remove.txt",
-                        value=saved_choice('choose_remove_txt', "", self.get_files(user_remove_dir))
-                    )
-
-                    remove_refresh_btn = gr.Button(
-                        "Refresh"
-                    )
-
-            with gr.Group():
-
-                with gr.Accordion("Extra", open=False):
-
-                    with gr.Box():
-
-                        mix_prompt = gr.Checkbox(
-                            label="Mix prompts",
-                            value=saved_value('mix_prompt', False)
-                        )
-
-                        mix_amount = gr.Slider(
-                            value=saved_slider('mix_amount', 2, 2, 10),
-                            label="Mix amount",
-                            minimum=2,
-                            maximum=10,
-                            step=1
-                        )
-
-                    with gr.Box():
-
-                        chaos_mode = gr.Radio(
-                            [
-                                "None",
-                                "Chaos",
-                                "Less Chaos"
-                            ],
-
-                            label="Chaos Mode",
-                            value=saved_choice('chaos_mode', 'None', ['None', 'Chaos', 'Less Chaos'])
-                        )
-
-                        chaos_amount = gr.Slider(
-                            value=saved_slider('chaos_amount', 0.5, 0.1, 1),
-                            label="Chaos Amount %",
-                            minimum=0.1,
-                            maximum=1,
-                            step=0.05
-                        )
-
-                    with gr.Box():
-
-                        negative_mode = gr.Radio(
-                            [
-                                "None",
-                                "Negative"
-                            ],
-
-                            label="Negative Mode",
-                            value=saved_choice('negative_mode', 'None', ['None', 'Negative'])
-                        )
-
-                    use_same_seed = gr.Checkbox(
-                        label="Use same seed for all pictures",
-                        value=saved_value('use_same_seed', False)
-                    )
-
-                    with gr.Box():
-
-                        use_cache = gr.Checkbox(
-                            label="Use cache",
-                            value=saved_value('use_cache', True)
-                        )
-
-            with InputAccordion(
-                saved_value('lora_enabled', False),
-                label="LoRAnado",
-                elem_id=self.elem_id("lo_enable")
-            ) as lora_enabled:
-
-                with gr.Box():
-
-                    lora_lock_prev = gr.Checkbox(
-                        label="Lock previous LoRAs",
-                        value=saved_value('lora_lock_prev', False)
-                    )
-
-                    lora_folder = gr.Textbox(
-                        value=saved_value('lora_folder', ""),
-                        lines=1,
-                        label="LoRAs Subfolder"
-                    )
-
-                    lora_amount = gr.Slider(
-                        value=saved_slider('lora_amount', 1, 1, 10),
-                        label="LoRAs Amount",
-                        minimum=1,
-                        maximum=10,
-                        step=1
-                    )
-
-                with gr.Box():
-
-                    lora_min = gr.Slider(
-                        value=saved_slider('lora_min', -1.0, -1, 1),
-                        label="Min LoRAs Weight",
-                        minimum=-1.0,
-                        maximum=1,
-                        step=0.1
-                    )
-
-                    lora_max = gr.Slider(
-                        value=saved_slider('lora_max', 1.0, -1, 1),
-                        label="Max LoRAs Weight",
-                        minimum=-1.0,
-                        maximum=1.0,
-                        step=0.1
-                    )
-
-                    lora_custom_weights = gr.Textbox(
-                        value=saved_value('lora_custom_weights', ""),
-                        lines=1,
-                        label="LoRAs Custom Weights"
-                    )
-
-            search_refresh_btn.click(
-                fn=self.refresh_ser,
-                inputs=[],
-                outputs=[choose_search_txt]
+            use_cache = gr.Checkbox(
+                label="Use cache",
+                info="Reuse booru API replies for an hour (faster, but repeats the same pages)",
+                value=saved_value('use_cache', True)
             )
 
-            remove_refresh_btn.click(
-                fn=self.refresh_rem,
-                inputs=[],
-                outputs=[choose_remove_txt]
-            )
+            credential_outputs = [
+                credentials_group,
+                credentials_heading,
+                api_key,
+                user_id,
+                credentials_status,
+                clear_credentials_btn
+            ]
 
-            # Event handler for loading credentials
-            # when booru changes
-            booru.input(
-                fn=self.load_gelbooru_credentials,
+            # .change (not .input) so the fields follow the booru however it
+            # is set, and never keep one site's key while another is selected.
+            booru.change(
+                fn=self.load_booru_credentials,
                 inputs=[booru],
-
-                outputs=[
-                    api_key,
-                    user_id,
-                    credentials_status,
-                    clear_credentials_btn
-                ]
+                outputs=credential_outputs
             )
 
-            # Event handler for clearing credentials
             clear_credentials_btn.click(
-                fn=self.clear_gelbooru_credentials,
-                inputs=[],
-
-                outputs=[
-                    api_key,
-                    user_id,
-                    credentials_status,
-                    clear_credentials_btn
-                ]
+                fn=self.clear_booru_credentials,
+                inputs=[booru],
+                outputs=credential_outputs
             )
 
         # Forge Neo applies ui-config.json AFTER building extension controls.
@@ -2704,33 +2409,12 @@ class Script(scripts.Script):
             change_color,
             shuffle_tags,
             post_id,
-            mix_prompt,
-            mix_amount,
-            chaos_mode,
-            negative_mode,
-            chaos_amount,
             limit_tags,
             max_tags,
             sorting_order,
             mature_rating,
-            lora_folder,
-            lora_amount,
-            lora_min,
-            lora_max,
-            lora_enabled,
-            lora_custom_weights,
-            lora_lock_prev,
             use_ip,
-            use_search_txt,
-            use_remove_txt,
-            choose_search_txt,
-            choose_remove_txt,
-            search_refresh_btn,
-            remove_refresh_btn,
             crop_center,
-            use_deepbooru,
-            type_deepbooru,
-            use_same_seed,
             use_cache,
             only_poses,
             strip_clothing,
@@ -2766,11 +2450,8 @@ class Script(scripts.Script):
         }
         state_names = tuple(state_controls)
         load_outputs = [state_controls[name] for name in state_names]
-        load_outputs.extend([
-            gelbooru_credentials_group,
-            enabled.accordion,
-            lora_enabled.accordion,
-        ])
+        load_outputs.append(enabled.accordion)
+        load_outputs.extend(credential_outputs)
 
         def restore_browser_page():
             state = load_ranbooru_settings(is_img2img)
@@ -2793,8 +2474,7 @@ class Script(scripts.Script):
             for name in state_names:
                 widget = state_controls[name]
                 if name not in state and name not in (
-                    'booru', 'mature_rating', 'fringe_benefits',
-                    'choose_search_txt', 'choose_remove_txt'
+                    'booru', 'mature_rating', 'fringe_benefits'
                 ):
                     results.append(gr.update())
                     continue
@@ -2808,15 +2488,6 @@ class Script(scripts.Script):
                 if name == 'mature_rating':
                     value = value if value in rating_choices else 'All'
                     results.append(gr.update(choices=rating_choices, value=value))
-                    continue
-
-                if name in ('choose_search_txt', 'choose_remove_txt'):
-                    path = user_search_dir if name == 'choose_search_txt' else user_remove_dir
-                    choices = self.get_files(path)
-                    results.append(gr.update(
-                        choices=choices,
-                        value=value if value in choices else None,
-                    ))
                     continue
 
                 if isinstance(widget, gr.Checkbox):
@@ -2848,14 +2519,9 @@ class Script(scripts.Script):
             enabled_on = state.get('enabled', enabled.value)
             if type(enabled_on) is not bool:
                 enabled_on = bool(enabled.value)
-            loranado_on = state.get('lora_enabled', lora_enabled.value)
-            if type(loranado_on) is not bool:
-                loranado_on = bool(lora_enabled.value)
-            results.extend([
-                gr.update(visible=(current_booru == 'gelbooru')),
-                gr.update(open=enabled_on),
-                gr.update(open=loranado_on),
-            ])
+            results.append(gr.update(open=enabled_on))
+            # The credentials panel follows the restored booru.
+            results.extend(self.booru_credential_updates(current_booru))
             print(f'[Ranbooru] Restored {len(state)} settings for '
                   f"{'img2img' if is_img2img else 'txt2img'} on browser load")
             return results
@@ -2890,77 +2556,6 @@ class Script(scripts.Script):
         else:
             return [768, 768]
 
-    def loranado(
-        self,
-        lora_enabled,
-        lora_folder,
-        lora_amount,
-        lora_min,
-        lora_max,
-        lora_custom_weights,
-        p,
-        lora_lock_prev
-    ):
-
-        lora_prompt = ''
-
-        if lora_enabled:
-
-            if lora_lock_prev:
-                lora_prompt = self.previous_loras
-
-            else:
-                loras = []
-
-                loras = os.listdir(f'{lora_folder}')
-
-                # get only .safetensors files
-                loras = [
-                    lora.replace('.safetensors', '')
-                    for lora in loras
-                    if lora.endswith('.safetensors')
-                ]
-
-                for l in range(0, lora_amount):
-
-                    lora_weight = 0
-
-                    if lora_custom_weights != '':
-                        lora_weight = float(
-                            lora_custom_weights.split(',')[l]
-                        )
-
-                    while lora_weight == 0:
-                        lora_weight = round(
-                            random.uniform(
-                                lora_min,
-                                lora_max
-                            ),
-                            1
-                        )
-
-                    lora_prompt += (
-                        f'<lora:{random.choice(loras)}'
-                        f':{lora_weight}>'
-                    )
-
-                self.previous_loras = lora_prompt
-
-            if lora_prompt:
-
-                if isinstance(p.prompt, list):
-
-                    for num, pr in enumerate(p.prompt):
-                        p.prompt[num] = (
-                            f'{lora_prompt} {pr}'
-                        )
-
-                else:
-                    p.prompt = (
-                        f'{lora_prompt} {p.prompt}'
-                    )
-
-        return p
     @clear_ranbooru_progress_on_error
     def before_process(
         self,
@@ -2981,33 +2576,12 @@ class Script(scripts.Script):
         change_color,
         shuffle_tags,
         post_id,
-        mix_prompt,
-        mix_amount,
-        chaos_mode,
-        negative_mode,
-        chaos_amount,
         limit_tags,
         max_tags,
         sorting_order,
         mature_rating,
-        lora_folder,
-        lora_amount,
-        lora_min,
-        lora_max,
-        lora_enabled,
-        lora_custom_weights,
-        lora_lock_prev,
         use_ip,
-        use_search_txt,
-        use_remove_txt,
-        choose_search_txt,
-        choose_remove_txt,
-        search_refresh_btn,
-        remove_refresh_btn,
         crop_center,
-        use_deepbooru,
-        type_deepbooru,
-        use_same_seed,
         use_cache,
         only_poses,
         strip_clothing,
@@ -3021,7 +2595,7 @@ class Script(scripts.Script):
 
         # Snapshot the actual submitted values, not partially edited browser state.
         # Saving before API queries also preserves inputs when the query fails.
-        if enabled or lora_enabled:
+        if enabled:
             save_ranbooru_settings(
                 getattr(self, '_ranbooru_is_img2img', isinstance(p, StableDiffusionProcessingImg2Img)),
                 locals()
@@ -3050,71 +2624,22 @@ class Script(scripts.Script):
             mark_booru_used(booru)
             show_ranbooru_progress(f'Searching {booru}...')
 
-            # Handle Gelbooru credentials
-            gelbooru_api_key = None
-            gelbooru_user_id = None
-
-            if booru == 'gelbooru':
-
-                # Use provided credentials
-                # or load from saved credentials
-                if (
-                    api_key.strip()
-                    and user_id.strip()
-                ):
-
-                    gelbooru_api_key = api_key.strip()
-                    gelbooru_user_id = user_id.strip()
-
-                    # Save credentials if checkbox is checked
-                    if save_credentials:
-                        credentials_manager.save_booru_credentials(
-                            'gelbooru',
-                            gelbooru_api_key,
-                            gelbooru_user_id
-                        )
-
-                else:
-                    # Try to load saved credentials
-                    saved_credentials = (
-                        credentials_manager
-                        .get_booru_credentials('gelbooru')
-                    )
-
-                    gelbooru_api_key = (
-                        saved_credentials.get(
-                            'api_key',
-                            ''
-                        )
-                    )
-
-                    gelbooru_user_id = (
-                        saved_credentials.get(
-                            'user_id',
-                            ''
-                        )
-                    )
+            # Credentials of the selected booru only (saved ones win).
+            booru_api_key, booru_user_id = resolve_booru_credentials(
+                booru, api_key, user_id, save_credentials, credentials_manager
+            )
 
             # Initialize APIs
             booru_apis = {
                 'gelbooru': Gelbooru(
                     fringe_benefits,
-                    gelbooru_api_key,
-                    gelbooru_user_id
+                    booru_api_key if booru == 'gelbooru' else None,
+                    booru_user_id if booru == 'gelbooru' else None
                 ),
 
                 'rule34': Rule34(
-                    username=(
-                        credentials_manager
-                        .get_booru_credentials('rule34')
-                        .get('user_id', '')
-                    ),
-
-                    api_key=(
-                        credentials_manager
-                        .get_booru_credentials('rule34')
-                        .get('api_key', '')
-                    )
+                    username=booru_user_id if booru == 'rule34' else None,
+                    api_key=booru_api_key if booru == 'rule34' else None
                 ),
 
                 'safebooru': Safebooru(),
@@ -3123,7 +2648,10 @@ class Script(scripts.Script):
                 'yande.re': Yandere(),
                 'aibooru': AIBooru(),
                 'xbooru': XBooru(),
-                'e621': e621(),
+                'e621': e621(
+                    username=booru_user_id if booru == 'e621' else None,
+                    api_key=booru_api_key if booru == 'e621' else None
+                ),
             }
 
             self.original_prompt = p.prompt
@@ -3202,24 +2730,7 @@ class Script(scripts.Script):
                     'korean_commentary'
                 ]
 
-            if ',' in remove_tags:
-                bad_tags.extend(
-                    remove_tags.split(',')
-                )
-
-            else:
-                bad_tags.append(remove_tags)
-
-            if use_remove_txt:
-                bad_tags.extend(
-                    open(
-                        os.path.join(
-                            user_remove_dir,
-                            choose_remove_txt
-                        ),
-                        'r'
-                    ).read().split(',')
-                )
+            bad_tags.extend(parse_tag_list(remove_tags))
 
             # Manage Backgrounds
             background_options = {
@@ -3288,46 +2799,6 @@ class Script(scripts.Script):
                         else color_option
                     )
 
-            if use_search_txt:
-
-                search_tags = open(
-                    os.path.join(
-                        user_search_dir,
-                        choose_search_txt
-                    ),
-                    'r'
-                ).read()
-
-                search_tags_r = search_tags.replace(
-                    " ",
-                    ""
-                )
-
-                split_tags = (
-                    search_tags_r.splitlines()
-                )
-
-                filtered_tags = [
-                    line
-                    for line in split_tags
-                    if line.strip()
-                ]
-
-                rand_selected = random.randint(
-                    0,
-                    len(filtered_tags) - 1
-                )
-
-                selected_tags = (
-                    filtered_tags[rand_selected]
-                )
-
-                tags = (
-                    f'{tags},{selected_tags}'
-                    if tags
-                    else selected_tags
-                )
-
             if booru == 'danbooru':
                 # Don't spend a scarce tag slot on -animated: the Danbooru
                 # adapter filters it locally after retrieving the posts.
@@ -3361,10 +2832,10 @@ class Script(scripts.Script):
             )
 
             print(f'Using {booru}')
-            if booru == 'gelbooru':
-                auth_present = bool(gelbooru_api_key and gelbooru_user_id)
+            if booru in CREDENTIAL_BOORUS:
+                auth_present = bool(booru_api_key and booru_user_id)
                 print(
-                    '[Ranbooru] Gelbooru API credentials: '
+                    f'[Ranbooru] {booru} API credentials: '
                     + ('key and user ID supplied' if auth_present
                        else 'MISSING/INCOMPLETE (search is anonymous)')
                 )
@@ -3494,63 +2965,7 @@ class Script(scripts.Script):
 
                 else:
 
-                    if mix_prompt:
-
-                        temp_tags = []
-                        max_tags = 0
-
-                        for _ in range(0, mix_amount):
-
-                            if not post_id:
-                                random_mix_number = 0
-
-                                if not post_id:
-                                    random_mix_number = (
-                                        self.random_number(
-                                            sorting_order,
-                                            1,
-                                            len(data['post'])
-                                        )[0]
-                                    )
-
-                                temp_tags.extend(
-                                    data['post'][
-                                        random_mix_number
-                                    ]['tags'].split(' ')
-                                )
-
-                                max_tags = max(
-                                    max_tags,
-
-                                    len(
-                                        data['post'][
-                                            random_mix_number
-                                        ]['tags'].split(' ')
-                                    )
-                                )
-
-                        # distinct temp_tags
-                        temp_tags = list(set(temp_tags))
-
-                        # Copy to avoid changing the source post when mixing.
-                        random_post = dict(data['post'][
-                            random_number
-                        ])
-
-                        max_tags = min(
-                            max(len(temp_tags), 20),
-                            max_tags
-                        )
-
-                        random_post['tags'] = ' '.join(
-                            random.sample(
-                                temp_tags,
-                                max_tags
-                            )
-                        )
-
-                    else:
-                        random_post = data['post'][random_number]
+                    random_post = data['post'][random_number]
 
                 clean_tags = (
                     random_post['tags']
@@ -3587,7 +3002,7 @@ class Script(scripts.Script):
                     print(random_post)
 
             # Get Images
-            if use_img2img or use_deepbooru:
+            if use_img2img:
 
                 image_urls = (
                     [random_post['file_url']]
@@ -3618,6 +3033,13 @@ class Script(scripts.Script):
                             f"{img}: {e}"
                         )
 
+                if not last_img:
+                    raise RuntimeError(
+                        f'[Ranbooru] Use img2img: none of the {len(image_urls)} '
+                        f'booru image(s) could be downloaded (see the console '
+                        f'for each error). Try again or turn off Use img2img.'
+                    )
+
             # e621 posts carry no categories; look up the prompt's tags.
             e621_dropped_tags = set()
             if isinstance(api_url, e621):
@@ -3642,24 +3064,10 @@ class Script(scripts.Script):
             # Cleaning Tags
             for prompt in prompts:
 
-                prompt_tags = [
-                    tag
-                    for tag in html.unescape(
-                        prompt
-                    ).split(',')
-                    if tag.strip() not in bad_tags
-                ]
-
-                for bad_tag in bad_tags:
-
-                    if '*' in bad_tag:
-
-                        prompt_tags = [
-                            tag
-                            for tag in prompt_tags
-                            if bad_tag.replace('*', '')
-                            not in tag
-                        ]
+                prompt_tags = remove_listed_tags(
+                    html.unescape(prompt).split(','),
+                    bad_tags
+                )
 
                 if e621_dropped_tags:
                     prompt_tags = [
@@ -3699,98 +3107,17 @@ class Script(scripts.Script):
                     else prompts[-1]
                 )
 
-                if chaos_mode in [
-                    'Chaos',
-                    'Less Chaos'
-                ]:
-
-                    negative_prompt = ''
-
-                    if chaos_mode == 'Less Chaos':
-                        negative_prompt = (
-                            p.negative_prompt
-                        )
-
-                    p.prompt, negative_prompt = (
-                        generate_chaos(
-                            p.prompt,
-                            negative_prompt,
-                            chaos_amount
-                        )
-                    )
-
-                    p.negative_prompt = (
-                        f"{p.negative_prompt},"
-                        f"{negative_prompt}"
-                        if p.negative_prompt
-                        else negative_prompt
-                    )
-
             else:
 
                 print('Processing Multiple Prompts')
 
-                negative_prompts = []
-                new_prompts = []
-
-                if chaos_mode == 'Chaos':
-
-                    for prompt in prompts:
-
-                        tmp_prompt, negative_prompt = (
-                            generate_chaos(
-                                prompt,
-                                p.negative_prompt,
-                                chaos_amount
-                            )
-                        )
-
-                        new_prompts.append(tmp_prompt)
-                        negative_prompts.append(
-                            negative_prompt
-                        )
-
-                    prompts = new_prompts
-                    p.negative_prompt = negative_prompts
-
-                elif chaos_mode == 'Less Chaos':
-
-                    for prompt in prompts:
-
-                        tmp_prompt, negative_prompt = (
-                            generate_chaos(
-                                prompt,
-                                '',
-                                chaos_amount
-                            )
-                        )
-
-                        new_prompts.append(tmp_prompt)
-
-                        negative_prompts.append(
-                            negative_prompt
-                        )
-
-                    prompts = new_prompts
-
-                    p.negative_prompt = [
-                        p.negative_prompt
-                        + ','
-                        + negative_prompt
-
-                        for negative_prompt
-                        in negative_prompts
-                    ]
-
-                else:
-
-                    p.negative_prompt = [
-                        p.negative_prompt
-                        for _ in range(
-                            0,
-                            p.batch_size * p.n_iter
-                        )
-                    ]
+                p.negative_prompt = [
+                    p.negative_prompt
+                    for _ in range(
+                        0,
+                        p.batch_size * p.n_iter
+                    )
+                ]
 
                 p.prompt = (
                     prompts
@@ -3815,117 +3142,6 @@ class Script(scripts.Script):
                             p.batch_size * p.n_iter
                         )
                     ]
-            if negative_mode == 'Negative':
-
-                # remove tags from p.prompt
-                # using tags from the original prompt
-                orig_list = self.original_prompt.split(',')
-
-                if isinstance(p.prompt, list):
-
-                    new_positive_prompts = []
-                    new_negative_prompts = []
-
-                    for pr, npp in zip(
-                        p.prompt,
-                        p.negative_prompt
-                    ):
-
-                        clean_prompt = pr.split(',')
-
-                        clean_prompt = [
-                            tag
-                            for tag in clean_prompt
-                            if tag not in orig_list
-                        ]
-
-                        clean_prompt = ','.join(
-                            clean_prompt
-                        )
-
-                        new_positive_prompts.append(
-                            self.original_prompt
-                        )
-
-                        new_negative_prompts.append(
-                            f'{npp},{clean_prompt}'
-                        )
-
-                    p.prompt = new_positive_prompts
-                    p.negative_prompt = (
-                        new_negative_prompts
-                    )
-
-                else:
-
-                    clean_prompt = p.prompt.split(',')
-
-                    clean_prompt = [
-                        tag
-                        for tag in clean_prompt
-                        if tag not in orig_list
-                    ]
-
-                    clean_prompt = ', '.join(tag.strip() for tag in clean_prompt if tag.strip())
-
-                    p.negative_prompt = (
-                        f'{p.negative_prompt},'
-                        f'{clean_prompt}'
-                    )
-
-                    p.prompt = self.original_prompt
-
-            if (
-                negative_mode == 'Negative'
-                or chaos_mode in [
-                    'Chaos',
-                    'Less Chaos'
-                ]
-            ):
-
-                # NEGATIVE PROMPT FIX
-                neg_prompt_tokens = []
-
-                for pr in p.negative_prompt:
-
-                    neg_prompt_tokens.append(
-                        model_hijack
-                        .get_prompt_lengths(pr)[1]
-                    )
-
-                if len(set(neg_prompt_tokens)) != 1:
-
-                    print('Padding negative prompts')
-
-                    max_tokens = max(
-                        neg_prompt_tokens
-                    )
-
-                    for num, neg in enumerate(
-                        neg_prompt_tokens
-                    ):
-
-                        while neg < max_tokens:
-
-                            p.negative_prompt[num] += (
-                                random.choice(
-                                    p.negative_prompt[
-                                        num
-                                    ].split(',')
-                                )
-                            )
-
-                            # p.negative_prompt[num] += '_'
-
-                            neg = (
-                                model_hijack
-                                .get_prompt_lengths(
-                                    p.negative_prompt[
-                                        num
-                                    ]
-                                )[1]
-                            )
-
             if limit_tags < 1:
 
                 if isinstance(p.prompt, list):
@@ -3979,74 +3195,6 @@ class Script(scripts.Script):
             elif isinstance(p.negative_prompt, str):
                 p.negative_prompt = normalize_prompt(p.negative_prompt)
 
-            if use_same_seed:
-
-                p.seed = (
-                    random.randint(
-                        0,
-                        2 ** 32 - 1
-                    )
-                    if p.seed == -1
-                    else p.seed
-                )
-
-                p.seed = [p.seed] * p.batch_size
-
-            # LORANADO
-            p = self.loranado(
-                lora_enabled,
-                lora_folder,
-                lora_amount,
-                lora_min,
-                lora_max,
-                lora_custom_weights,
-                p,
-                lora_lock_prev
-            )
-
-            if (
-                use_deepbooru
-                and not use_img2img
-            ):
-
-                self.last_img = last_img
-
-                tagged_prompts = self.use_autotagger(
-                    'deepbooru',
-                    only_poses,
-                    strip_clothing
-                )
-
-                if isinstance(p.prompt, list):
-
-                    p.prompt = [
-                        modify_prompt(
-                            pr,
-                            tagged_prompts[num],
-                            type_deepbooru
-                        )
-
-                        for num, pr
-                        in enumerate(p.prompt)
-                    ]
-
-                    p.prompt = [
-                        remove_repeated_tags(pr)
-                        for pr in p.prompt
-                    ]
-
-                else:
-
-                    p.prompt = modify_prompt(
-                        p.prompt,
-                        tagged_prompts,
-                        type_deepbooru
-                    )
-
-                    p.prompt = remove_repeated_tags(
-                        p.prompt
-                    )
-
             if use_img2img:
 
                 if not use_ip:
@@ -4057,61 +3205,7 @@ class Script(scripts.Script):
                 self.last_img = last_img
 
                 if use_ip:
-
-                    controlNetModule = (
-                        importlib.import_module(
-                            'extensions.'
-                            'sd-webui-controlnet.'
-                            'scripts.external_code',
-                            'external_code'
-                        )
-                    )
-
-                    controlNetList = (
-                        controlNetModule
-                        .get_all_units_in_processing(p)
-                    )
-
-                    copied_network = (
-                        controlNetList[0]
-                        .__dict__
-                        .copy()
-                    )
-
-                    copied_network['enabled'] = True
-
-                    copied_network['weight'] = (
-                        denoising
-                    )
-
-                    array_img = np.array(last_img[0])
-
-                    copied_network['image']['image'] = (
-                        array_img
-                    )
-
-                    copied_networks = (
-                        [copied_network]
-                        + controlNetList[1:]
-                    )
-
-                    controlNetModule.update_cn_script_in_processing(
-                        p,
-                        copied_networks
-                    )
-
-            elif lora_enabled:
-
-                p = self.loranado(
-                    lora_enabled,
-                    lora_folder,
-                    lora_amount,
-                    lora_min,
-                    lora_max,
-                    lora_custom_weights,
-                    p,
-                    lora_lock_prev
-                )
+                    send_image_to_controlnet(p, last_img[0], denoising)
 
     @clear_ranbooru_progress_after_postprocess
     def postprocess(
@@ -4134,33 +3228,12 @@ class Script(scripts.Script):
         change_color,
         shuffle_tags,
         post_id,
-        mix_prompt,
-        mix_amount,
-        chaos_mode,
-        negative_mode,
-        chaos_amount,
         limit_tags,
         max_tags,
         sorting_order,
         mature_rating,
-        lora_folder,
-        lora_amount,
-        lora_min,
-        lora_max,
-        lora_enabled,
-        lora_custom_weights,
-        lora_lock_prev,
         use_ip,
-        use_search_txt,
-        use_remove_txt,
-        choose_search_txt,
-        choose_remove_txt,
-        search_refresh_btn,
-        remove_refresh_btn,
         crop_center,
-        use_deepbooru,
-        type_deepbooru,
-        use_same_seed,
         use_cache,
         only_poses,
         strip_clothing,
@@ -4201,108 +3274,42 @@ class Script(scripts.Script):
                     self.last_img[0]
                 )
 
-            final_prompts = p.prompt
-
-            if use_deepbooru:
-
-                tagged_prompts = self.use_autotagger(
-                    'deepbooru',
-                    only_poses,
-                    strip_clothing
-                )
-
-                if isinstance(p.prompt, list):
-
-                    final_prompts = [
-                        modify_prompt(
-                            pr,
-                            tagged_prompts[num],
-                            type_deepbooru
-                        )
-
-                        for num, pr
-                        in enumerate(p.prompt)
-                    ]
-
-                    final_prompts = [
-                        remove_repeated_tags(pr)
-                        for pr in final_prompts
-                    ]
-
-                else:
-
-                    final_prompts = modify_prompt(
-                        p.prompt,
-                        tagged_prompts,
-                        type_deepbooru
-                    )
-
-                    final_prompts = remove_repeated_tags(
-                        final_prompts
-                    )
-
-            p = StableDiffusionProcessingImg2Img(
+            # Second pass: a real img2img run on the booru images. Copy the
+            # generation settings that exist on this WebUI build (styles,
+            # variation seed, distilled CFG, clip skip and other overrides...),
+            # but not scripts, which would run Ranbooru again.
+            settings = img2img_settings_from(p, StableDiffusionProcessingImg2Img)
+            settings.update(
                 sd_model=shared.sd_model,
-
                 outpath_samples=(
                     shared.opts.outdir_samples
                     or shared.opts.outdir_img2img_samples
                 ),
-
                 outpath_grids=(
                     shared.opts.outdir_grids
                     or shared.opts.outdir_img2img_grids
                 ),
-
-                prompt=final_prompts,
-
-                negative_prompt=p.negative_prompt,
-
-                seed=p.seed,
-
-                sampler_name=p.sampler_name,
-
-                scheduler=p.scheduler,
-
-                batch_size=p.batch_size,
-
-                n_iter=p.n_iter,
-
                 steps=self.real_steps,
-
-                cfg_scale=p.cfg_scale,
-
                 width=width,
-
                 height=height,
-
                 init_images=self.last_img,
-
                 denoising_strength=denoising,
             )
+            p = StableDiffusionProcessingImg2Img(**settings)
 
             proc = process_images(p)
 
             processed.images = proc.images
             processed.infotexts = proc.infotexts
 
-            if use_last_img:
-
-                processed.images.append(
-                    self.last_img[0]
+            # Show the source booru image(s) after the results, each with the
+            # infotext of the image it produced.
+            sources = self.last_img[:1] if use_last_img else self.last_img
+            for num, img in enumerate(sources):
+                processed.images.append(img)
+                processed.infotexts.append(
+                    source_infotext(proc.infotexts, proc.index_of_first_image, num)
                 )
-
-            else:
-
-                for num, img in enumerate(
-                    self.last_img
-                ):
-
-                    processed.images.append(img)
-
-                    processed.infotexts.append(
-                        proc.infotexts[num + 1]
-                    )
 
     def random_number(self, sorting_order, size, available_count):
         """Choose valid indices from the posts actually returned by the API.
@@ -4329,73 +3336,3 @@ class Script(scripts.Script):
             return random.choices(range(count), k=size)
         return random.sample(range(count), size)
 
-    def use_autotagger(
-        self,
-        model,
-        only_poses=False,
-        strip_clothing=False
-    ):
-        """
-        Use the autotagger to tag the images
-
-        Args:
-            model (str):
-                the model to use.
-                Right now only
-                'deepbooru'
-                is supported
-
-        Returns:
-            list:
-                the tagged prompts
-        """
-
-        if model == 'deepbooru':
-
-            if isinstance(
-                self.original_prompt,
-                str
-            ):
-
-                orig_prompt = [
-                    self.original_prompt
-                ]
-
-            else:
-                orig_prompt = self.original_prompt
-
-            deepbooru.model.start()
-
-            final_prompts = []
-
-            for img, prompt in zip(
-                self.last_img,
-                orig_prompt
-            ):
-
-                deepbooru_tags = deepbooru.model.tag_multi(img)
-
-                # Interrogated tags bypass the booru cleaning loop.
-                if only_poses or strip_clothing:
-                    deepbooru_tags = ', '.join(
-                        tag.strip()
-                        for tag in filter_pose_tags(
-                            deepbooru_tags.split(','),
-                            strip_traits=only_poses,
-                            strip_clothing=strip_clothing,
-                            # Deepbooru emits Danbooru tag names.
-                            names=pose_name_tags,
-                            qualifiers=pose_name_qualifiers
-                        )
-                        if tag.strip()
-                    )
-
-                final_prompts.append(
-                    prompt
-                    + ','
-                    + deepbooru_tags
-                )
-
-            deepbooru.model.stop()
-
-            return final_prompts

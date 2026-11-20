@@ -1,10 +1,10 @@
 # Ranbooru state persistence (Forge Neo)
 
-Ranbooru and LoRAnado remember their UI settings from the last generation performed with at least one of them enabled.
+Ranbooru remembers its UI settings from the last generation performed with it enabled.
 
 - Saved settings file: `user/last_settings.json`
 - Separate values are stored for `txt2img` and `img2img`.
-- Generating with both Ranbooru and LoRAnado disabled does not replace the last enabled state.
+- Generating with Ranbooru disabled does not replace the last enabled state.
 - API key and user ID are not recorded in `last_settings.json`; the existing "Save credentials" opt-in controls credential persistence.
 - Ranbooru controls opt out of Forge Neo's `ui-config.json` restoration because it otherwise overwrites the last-generated values on startup.
 - **Every browser page load** (reload, opening a new tab, closing and reopening the browser) fetches the current saved values from disk, even while the WebUI server stays running.
@@ -12,8 +12,8 @@ Ranbooru and LoRAnado remember their UI settings from the last generation perfor
 
 ## Check persistence
 
-1. Enable Ranbooru (or LoRAnado), edit a tag/text field and slider, and press **Generate**.
-2. Look for `[Ranbooru] Saved 43 settings for txt2img` (or `img2img`) in the terminal.
+1. Enable Ranbooru, edit a tag/text field and slider, and press **Generate**.
+2. Look for `[Ranbooru] Saved 27 settings for txt2img` (or `img2img`) in the terminal.
 3. Verify `user/last_settings.json` exists.
 4. Without stopping WebUI, refresh the page or open a new tab. Saved values should reappear.
 5. A full WebUI restart should also restore them.
