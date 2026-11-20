@@ -1,5 +1,6 @@
 from io import BytesIO
 import html
+import re
 import random
 import requests
 import modules.scripts as scripts
@@ -166,6 +167,9 @@ RANBOORU_STATE_FIELDS = (
     'type_deepbooru',
     'use_same_seed',
     'use_cache',
+    'only_poses',
+    'strip_clothing',
+    'names_all_boorus',
     'save_credentials',
 )
 
@@ -399,6 +403,246 @@ BW_BG = [
     'greyscale',
     'grayscale'
 ]
+
+# --- Only Poses mode ---------------------------------------------------------
+# The main lists come from Danbooru's tag group wiki pages, pre-generated into
+# pose_tag_groups.json by tools/build_pose_tag_groups.py (never fetched at
+# runtime). Tags in the 'keep' set (posture, gestures, expressions, framing,
+# character count) are never stripped. Colour/creature combinations the wiki
+# does not list one by one (white_shirt, cat_tail) are matched structurally:
+# a known noun preceded only by known modifier words. Substring wildcards are
+# avoided: '*_eyes' would also remove closed_eyes, which this mode must keep.
+POSE_COLOR_WORDS = frozenset((
+    'aqua', 'black', 'blonde', 'blue', 'brown', 'green', 'grey', 'gray',
+    'orange', 'pink', 'purple', 'red', 'silver', 'white', 'yellow', 'gold',
+    'golden', 'beige', 'teal', 'cyan', 'magenta', 'violet', 'lavender',
+    'light', 'dark', 'pale', 'platinum', 'strawberry', 'ash', 'rainbow',
+    'multicolored', 'two-tone', 'gradient', 'streaked', 'split-color',
+    'colored', 'tan', 'olive', 'maroon', 'navy', 'crimson',
+))
+
+# Fallback for appearance: colour + one of these nouns (red_eyes, blue_skin).
+POSE_COLOR_TRAIT_NOUNS = frozenset((
+    'hair', 'eyes', 'skin', 'pupils', 'sclera', 'eyelashes', 'eyebrows',
+    'streaks',
+    # e621 body colours: blue_fur, white_body, green_scales.
+    'body', 'fur', 'scales', 'feathers',
+))
+
+POSE_CREATURE_WORDS = frozenset((
+    'animal', 'cat', 'dog', 'fox', 'wolf', 'rabbit', 'bunny', 'mouse',
+    'horse', 'cow', 'sheep', 'goat', 'tiger', 'lion', 'bear', 'raccoon',
+    'squirrel', 'monkey', 'pig', 'deer', 'dragon', 'demon', 'devil',
+    'angel', 'bat', 'bird', 'feathered', 'fairy', 'insect', 'butterfly',
+    'fish', 'shark', 'snake', 'lizard', 'oni', 'kitsune', 'monster',
+    'mechanical', 'fake', 'extra', 'multiple', 'small', 'large', 'curled',
+    'single', 'eastern', 'western',
+))
+
+# Fallback for creature parts: creature/colour + noun (cat_tail, black_horns).
+POSE_CREATURE_TRAIT_NOUNS = frozenset((
+    'ears', 'tail', 'tails', 'horns', 'horn', 'wings', 'halo', 'girl', 'boy',
+))
+
+POSE_CLOTHING_MODIFIERS = POSE_COLOR_WORDS | frozenset((
+    'long', 'short', 'mini', 'micro', 'pencil', 'pleated', 'frilled',
+    'striped', 'vertical-striped', 'plaid', 'checkered', 'polka', 'dot',
+    'print', 'floral', 'lace', 'leather', 'latex', 'denim', 'fur',
+    'see-through', 'sheer', 'sleeveless', 'strapless', 'backless',
+    'halterneck', 'off-shoulder', 'detached', 'wide', 'puffy', 'juliet',
+    'open', 'unbuttoned', 'torn', 'cropped', 'high-waist', 'side-tie',
+    'string', 'competition', 'one-piece', 'school', 'sailor', 'maid',
+    'gothic', 'military', 'santa', 'witch', 'baseball', 'peaked', 'top',
+    'straw', 'cowboy', 'hair', 'thigh', 'knee', 'ankle', 'elbow',
+    'fingerless', 'bridal', 'wedding', 'china', 'chinese', 'japanese',
+    'single', 'mismatched', 'hooded', 'neck', 'mob', 'wrist', 'x', 'star',
+    'heart', 'gym', 'sports', 'naval', 'nurse', 'police', 'track',
+    'turtleneck', 'sweater', 'bow', 'ribbon', 'animal', 'rabbit', 'fake',
+    'round', 'high', 'low', 'thick', 'arm', 'leg', 'garter', 'tight',
+    'loose', 'oversized', 'collared', 'buttoned', 'shiny', 'wet',
+    'transparent', 'frilled', 'winter', 'summer', 'asymmetrical', 'waist',
+    'highleg', 'front-tie', 'multiple',
+))
+
+# Generic fallbacks for boorus whose posts carry no tag categories.
+POSE_QUALIFIER_SUFFIXES = ('_(artist)', '_(cosplay)')
+
+# Booru post fields listing the artist, character and copyright tags.
+POSE_CATEGORY_FIELDS = (
+    'tag_string_artist', 'tag_string_character', 'tag_string_copyright'
+)
+
+POSE_EMPTY_GROUPS = {
+    'traits': frozenset(), 'clothing': frozenset(), 'keep': frozenset(),
+    'clothing_nouns': frozenset(),
+}
+
+
+def load_pose_tag_groups(path):
+    """Read the generated tag lists; an unreadable file leaves only the fallback rules."""
+    try:
+        with open(path, 'r', encoding='utf-8') as groups_file:
+            data = json.load(groups_file)
+        groups = {
+            name: frozenset(
+                tag for tag in data.get(name, []) if isinstance(tag, str)
+            )
+            for name in ('traits', 'clothing', 'keep')
+        }
+    except (OSError, ValueError, AttributeError, TypeError) as exc:
+        print(f'[Ranbooru] Only Poses tag lists unavailable ({exc}); '
+              'using built-in rules only.')
+        return dict(POSE_EMPTY_GROUPS)
+    # Single-word clothing tags (shirt, skirt) become nouns for white_shirt etc.
+    groups['clothing_nouns'] = frozenset(
+        tag for tag in groups['clothing'] if '_' not in tag
+    ) | {'hair_ornament', 'hair_ribbon', 'hair_bow', 'hair_flower',
+         'sailor_collar', 'high_heels', 'tank_top', 'crop_top', 'nails'}
+    return groups
+
+
+def load_pose_name_tags(path):
+    """Danbooru's most-used character/copyright/artist names, for boorus without tag categories."""
+    try:
+        with open(path, 'r', encoding='utf-8') as names_file:
+            data = json.load(names_file)
+        return frozenset(
+            tag
+            for key in ('copyright', 'character', 'artist')
+            for tag in data.get(key, [])
+            if isinstance(tag, str)
+        )
+    except (OSError, ValueError, AttributeError, TypeError) as exc:
+        print(f'[Ranbooru] Only Poses name list unavailable ({exc}); '
+              'names are only stripped where the booru reports tag categories.')
+        return frozenset()
+
+
+def load_pose_name_qualifiers(path):
+    """Series names that mark a tag as a character/series item: name_(series)."""
+    try:
+        with open(path, 'r', encoding='utf-8') as names_file:
+            data = json.load(names_file)
+        return frozenset(
+            q for q in data.get('qualifiers', []) if isinstance(q, str)
+        )
+    except (OSError, ValueError, AttributeError, TypeError):
+        return frozenset()
+
+
+POSE_QUALIFIER_PATTERN = re.compile(r'_\(([^()]+)\)')
+
+
+def has_series_qualifier(norm, qualifiers):
+    """jester_(fire_emblem)_(timeskip) -> True when 'fire_emblem' is a known series."""
+    if '_(' not in norm:
+        return False
+    return any(q in qualifiers for q in POSE_QUALIFIER_PATTERN.findall(norm))
+
+
+# Boorus that share Danbooru's tag names but report no tag categories.
+POSE_NAME_LIST_BOORUS = ('gelbooru',)
+
+
+def pose_names_for(booru, only_poses, names_all_boorus, names):
+    """The Danbooru name list applies on Gelbooru, or anywhere when the experimental toggle is on."""
+    if only_poses and (booru in POSE_NAME_LIST_BOORUS or names_all_boorus):
+        return names
+    return frozenset()
+
+
+def _normalize_pose_tag(tag):
+    """Compare tags in booru form: lower case, underscores, unescaped parens."""
+    tag = tag.strip().lower().replace('\\(', '(').replace('\\)', ')')
+    return '_'.join(tag.split())
+
+
+def _matches_structure(words, nouns, modifiers):
+    """True when the tag is a noun preceded only by (at least one) modifier."""
+    for size in (2, 1):
+        if len(words) <= size:
+            continue
+        if '_'.join(words[-size:]) in nouns and all(
+            word in modifiers for word in words[:-size]
+        ):
+            return True
+    return False
+
+
+def is_characteristic_tag(tag, strip_traits=True, strip_clothing=False,
+                          excluded=(), groups=None, names=(), qualifiers=()):
+    """Whether Only Poses / clothing stripping should remove this tag."""
+    if groups is None:
+        groups = pose_tag_groups
+    norm = _normalize_pose_tag(tag)
+    if not norm:
+        return False
+
+    # The booru itself says this is an artist/character/copyright tag.
+    if strip_traits and (norm in excluded or norm.endswith(POSE_QUALIFIER_SUFFIXES)):
+        return True
+    if norm in groups['keep']:
+        return False
+    words = norm.split('_')
+
+    if strip_traits:
+        # Danbooru name list (character/copyright/artist), when enabled.
+        if norm in names or has_series_qualifier(norm, qualifiers):
+            return True
+        if norm in groups['traits']:
+            return True
+        if _matches_structure(words, POSE_COLOR_TRAIT_NOUNS, POSE_COLOR_WORDS):
+            return True
+        if _matches_structure(words, POSE_CREATURE_TRAIT_NOUNS,
+                              POSE_CREATURE_WORDS | POSE_COLOR_WORDS):
+            return True
+
+    if strip_clothing:
+        if norm in groups['clothing']:
+            return True
+        if _matches_structure(words, groups['clothing_nouns'], POSE_CLOTHING_MODIFIERS):
+            return True
+
+    return False
+
+
+def filter_pose_tags(tags, strip_traits=True, strip_clothing=False,
+                     excluded=(), groups=None, names=(), qualifiers=()):
+    """Return the tags (in order) that survive Only Poses / clothing stripping."""
+    if not strip_traits and not strip_clothing:
+        return list(tags)
+    return [
+        tag for tag in tags
+        if not is_characteristic_tag(tag, strip_traits, strip_clothing,
+                                     excluded, groups, names, qualifiers)
+    ]
+
+
+def post_category_tags(post):
+    """Artist, character and copyright tags a booru post reports, normalized."""
+    found = []
+    for field in POSE_CATEGORY_FIELDS:
+        value = post.get(field)
+        if isinstance(value, str):
+            found.extend(value.split())
+    categories = post.get('ranbooru_tag_categories')
+    if isinstance(categories, dict):
+        for values in categories.values():
+            if isinstance(values, list):
+                found.extend(v for v in values if isinstance(v, str))
+    return {_normalize_pose_tag(tag) for tag in found if tag.strip()}
+
+
+pose_tag_groups = load_pose_tag_groups(
+    os.path.join(extension_root, 'pose_tag_groups.json')
+)
+pose_name_tags = load_pose_name_tags(
+    os.path.join(extension_root, 'pose_name_tags.json')
+)
+pose_name_qualifiers = load_pose_name_qualifiers(
+    os.path.join(extension_root, 'pose_name_tags.json')
+)
+
 
 POST_AMOUNT = 100
 
@@ -1322,79 +1566,123 @@ class Danbooru(Booru):
         return {'post': [post]}
 
 class e621(Booru):
+    # e621 rejects page 0 and anything beyond page 750 (HTTP 410).
+    MAX_PAGE = 750
+    TAG_CATEGORIES = ('general', 'artist', 'copyright', 'character', 'species')
+
     def __init__(self):
         super().__init__(
-            'danbooru',
+            'e621',
             f'https://e621.net/posts.json?limit={POST_AMOUNT}'
         )
+        # e621 asks API clients for a descriptive User-Agent.
+        self.headers['user-agent'] = 'Ranbooru-Forge-Neo/1.0 (tag prompt extension)'
+
+    @staticmethod
+    def _read_api_json(response):
+        """Return the post list; raise a readable error for e621 error objects."""
+        status = getattr(response, 'status_code', 200)
+        try:
+            result = response.json()
+        except ValueError as exc:
+            raise RuntimeError(
+                f'[Ranbooru] e621 returned a non-JSON response (HTTP {status}).'
+            ) from exc
+
+        if isinstance(result, dict) and (
+            status >= 400 or result.get('success') is False
+        ):
+            message = result.get('message') or result.get('reason') or 'request rejected'
+            if status == 429:
+                message += '. Rate limit reached; retry later.'
+            raise RuntimeError(f'[Ranbooru] e621 API error (HTTP {status}): {message}')
+        if status >= 400:
+            raise RuntimeError(f'[Ranbooru] e621 API error (HTTP {status}).')
+
+        # The current API returns a bare list; older versions wrapped it.
+        if isinstance(result, dict) and isinstance(result.get('posts'), list):
+            result = result['posts']
+        elif isinstance(result, dict) and isinstance(result.get('post'), dict):
+            result = [result['post']]
+        if not isinstance(result, list):
+            raise RuntimeError(
+                f'[Ranbooru] e621 API returned invalid data (HTTP {status}).'
+            )
+        return result
+
+    @classmethod
+    def _normalize_post(cls, post):
+        """Map an e621 post onto the fields before_process reads, or None to skip it."""
+        if not isinstance(post, dict):
+            return None
+        flags = post.get('flags')
+        if isinstance(flags, dict) and flags.get('deleted'):
+            return None
+        files = post.get('files') or post.get('file') or {}
+        original = files.get('original', files) if isinstance(files, dict) else {}
+        file_url = original.get('url') if isinstance(original, dict) else None
+        # Anonymous requests get no image URL for some posts; skip those so
+        # img2img and Deepbooru never fall back to an unrelated picture.
+        if not isinstance(file_url, str) or not file_url:
+            return None
+
+        tags = post.get('tags')
+        if isinstance(tags, dict):
+            # Older API: tags grouped by category.
+            post['ranbooru_tag_categories'] = {
+                category: tags.get(category, [])
+                for category in ('artist', 'copyright', 'character', 'species')
+                if isinstance(tags.get(category), list)
+            }
+            tags = [
+                tag
+                for category in cls.TAG_CATEGORIES
+                for tag in tags.get(category, [])
+                if isinstance(tag, str)
+            ]
+        elif isinstance(tags, str):
+            tags = tags.split()
+        if not isinstance(tags, list):
+            return None
+        tags = [tag for tag in tags if isinstance(tag, str) and tag]
+        if 'animated' in tags:
+            return None
+
+        stats = post.get('stats') if isinstance(post.get('stats'), dict) else post
+        score = stats.get('score', 0)
+        if isinstance(score, dict):
+            score = score.get('total', 0)
+        if type(score) is not int:
+            score = 0
+
+        post['tags'] = ' '.join(tags)
+        post['score'] = score
+        post['file_url'] = file_url
+        return post
+
+    def _request(self, url):
+        self.last_url = url
+        try:
+            response = requests.get(url, headers=self.headers, timeout=20)
+        except requests.RequestException as exc:
+            raise RuntimeError(f'[Ranbooru] Unable to contact e621: {exc}') from exc
+        return self._read_api_json(response)
 
     def get_data(self, add_tags, max_pages=10, id=''):
         global COUNT
 
-        loop_msg = True
+        if id:
+            add_tags = ''
 
-        # run loop at most twice
-        for loop in range(2):
-
-            if id:
-                add_tags = ''
-
-            url = (
-                f"{self.booru_url}"
-                f"&page={random.randint(0, max_pages - 1)}"
-                f"{id}{add_tags}"
-            )
-
-            self.last_url = url
-
-            res = requests.get(
-                url,
-                headers=self.headers
-            )
-
-            data = res.json()['posts']
-
-            COUNT = len(data)
-
-            for post in data:
-                temp_tags = []
-
-                sublevels = [
-                    'general',
-                    'artist',
-                    'copyright',
-                    'character',
-                    'species'
-                ]
-
-                for sublevel in sublevels:
-                    temp_tags.extend(post['tags'][sublevel])
-
-                post['tags'] = ' '.join(temp_tags)
-                post['score'] = post['score']['total']
-
-            if COUNT <= max_pages * POST_AMOUNT:
-                max_pages = COUNT // POST_AMOUNT + 1
-
-                # If max_pages is bigger than available pages,
-                # loop the function with updated max_pages
-                # based on the value of COUNT
-
-                while loop_msg:
-                    print(f" Processing {COUNT} results.")
-                    loop_msg = False
-                    continue
-
-            else:
-                print(
-                    f" Processing "
-                    f"{max_pages * POST_AMOUNT} "
-                    f"out of {COUNT} results."
-                )
-
-                break
-
-        return {'post': data}
+        # One request to a random ONE-based page; before_process retries
+        # page 1 itself when a random page comes back empty.
+        last_page = max(1, min(int(max_pages), self.MAX_PAGE))
+        page = random.randint(1, last_page)
+        raw_posts = self._request(f'{self.booru_url}&page={page}{id}{add_tags}')
+        posts = [p for p in map(self._normalize_post, raw_posts) if p is not None]
+        COUNT = len(posts)
+        print(f'[Ranbooru] e621: {COUNT} usable posts on page {page}.')
+        return {'post': posts}
 
     def get_post(self, add_tags, max_pages=10, id=''):
         return self.get_data(
@@ -1402,6 +1690,49 @@ class e621(Booru):
             max_pages,
             "&id=" + id
         )
+
+    # Posts no longer carry tag categories, so look them up: meta, lore and
+    # invalid tags never belonged in a prompt (the old adapter skipped those
+    # categories), and Only Poses strips the name categories.
+    TAGS_URL = 'https://e621.net/tags.json?limit=320&search[name]='
+    NAME_CATEGORIES = {1: 'artist', 3: 'copyright', 4: 'character', 5: 'species'}
+    DROP_CATEGORIES = {6: 'invalid', 7: 'meta', 8: 'lore'}
+    LOOKUP_CHUNK = 300
+    _category_cache = {}
+
+    def name_tags(self, tags):
+        """Artist/copyright/character/species tags among `tags`."""
+        categories = self.tag_categories(tags)
+        return {t for t, c in categories.items() if c in self.NAME_CATEGORIES}
+
+    def tag_categories(self, tags):
+        """Map each of `tags` to its e621 category id (None when unknown).
+
+        Results are cached per tag; on any error the remaining tags are simply
+        treated as unknown, so generation never fails because of this lookup.
+        """
+        from urllib.parse import quote
+        cache = self._category_cache
+        missing = sorted(t for t in set(tags) if t and t not in cache)
+        for start in range(0, len(missing), self.LOOKUP_CHUNK):
+            chunk = missing[start:start + self.LOOKUP_CHUNK]
+            url = self.TAGS_URL + quote(','.join(chunk), safe=',')
+            try:
+                response = requests.get(url, headers=self.headers, timeout=20)
+                rows = response.json() if response.status_code == 200 else None
+            except (requests.RequestException, ValueError) as exc:
+                rows = None
+                print(f'[Ranbooru] e621 tag category lookup failed: {exc}')
+            if not isinstance(rows, list):
+                print('[Ranbooru] e621 tag categories unavailable; '
+                      'names may remain in the prompt.')
+                break
+            for row in rows:
+                if isinstance(row, dict) and isinstance(row.get('name'), str):
+                    cache[row['name']] = row.get('category')
+            for tag in chunk:
+                cache.setdefault(tag, None)
+        return {t: cache.get(t) for t in set(tags)}
 
 
 def generate_chaos(pos_tags, neg_tags, chaos_amount):
@@ -1856,6 +2187,23 @@ class Script(scripts.Script):
                 value=saved_value('shuffle_tags', True)
             )
 
+            only_poses = gr.Checkbox(
+                label="Only poses (strip appearance, character, copyright & artist tags)",
+                info="Names come from booru tag categories on Danbooru/AIBooru and from Danbooru's top-name list on Gelbooru",
+                value=saved_value('only_poses', False)
+            )
+
+            strip_clothing = gr.Checkbox(
+                label="Strip clothing & accessories",
+                value=saved_value('strip_clothing', False)
+            )
+
+            names_all_boorus = gr.Checkbox(
+                label="Experimental: strip Danbooru name list on every booru",
+                info="With Only poses, also removes Danbooru's ~35k most-used character, copyright and artist names on boorus other than Gelbooru",
+                value=saved_value('names_all_boorus', False)
+            )
+
             change_dash = gr.Checkbox(
                 label='Convert "_" to spaces',
                 value=saved_value('change_dash', False)
@@ -2282,6 +2630,9 @@ class Script(scripts.Script):
             type_deepbooru,
             use_same_seed,
             use_cache,
+            only_poses,
+            strip_clothing,
+            names_all_boorus,
             api_key,
             user_id,
             save_credentials,
@@ -2556,6 +2907,9 @@ class Script(scripts.Script):
         type_deepbooru,
         use_same_seed,
         use_cache,
+        only_poses,
+        strip_clothing,
+        names_all_boorus,
         api_key,
         user_id,
         save_credentials,
@@ -2963,6 +3317,19 @@ class Script(scripts.Script):
 
             data['post'] = clean_posts
 
+            # Artist/character/copyright tags reported by the booru, gathered
+            # from the whole page so mixed prompts are covered too.
+            pose_excluded_tags = set()
+            if only_poses:
+                for post in clean_posts:
+                    pose_excluded_tags.update(post_category_tags(post))
+            pose_names = pose_names_for(
+                booru, only_poses, names_all_boorus, pose_name_tags
+            )
+            pose_qualifiers = pose_names_for(
+                booru, only_poses, names_all_boorus, pose_name_qualifiers
+            )
+
             if not clean_posts:
                 raise ValueError(
                     '[Ranbooru] No posts were returned by the booru API for '
@@ -3149,6 +3516,25 @@ class Script(scripts.Script):
                             f"{img}: {e}"
                         )
 
+            # e621 posts carry no categories; look up the prompt's tags.
+            e621_dropped_tags = set()
+            if isinstance(api_url, e621):
+                e621_categories = api_url.tag_categories({
+                    _normalize_pose_tag(tag)
+                    for prompt in prompts
+                    for tag in html.unescape(prompt).split(',')
+                    if tag.strip()
+                })
+                e621_dropped_tags = {
+                    tag for tag, category in e621_categories.items()
+                    if category in e621.DROP_CATEGORIES
+                }
+                if only_poses:
+                    pose_excluded_tags.update(
+                        tag for tag, category in e621_categories.items()
+                        if category in e621.NAME_CATEGORIES
+                    )
+
             new_prompts = []
 
             # Cleaning Tags
@@ -3172,6 +3558,21 @@ class Script(scripts.Script):
                             if bad_tag.replace('*', '')
                             not in tag
                         ]
+
+                if e621_dropped_tags:
+                    prompt_tags = [
+                        tag for tag in prompt_tags
+                        if _normalize_pose_tag(tag) not in e621_dropped_tags
+                    ]
+
+                prompt_tags = filter_pose_tags(
+                    prompt_tags,
+                    strip_traits=only_poses,
+                    strip_clothing=strip_clothing,
+                    excluded=pose_excluded_tags,
+                    names=pose_names,
+                    qualifiers=pose_qualifiers
+                )
 
                 new_prompt = ', '.join(tag.strip() for tag in prompt_tags if tag.strip())
 
@@ -3508,7 +3909,9 @@ class Script(scripts.Script):
                 self.last_img = last_img
 
                 tagged_prompts = self.use_autotagger(
-                    'deepbooru'
+                    'deepbooru',
+                    only_poses,
+                    strip_clothing
                 )
 
                 if isinstance(p.prompt, list):
@@ -3656,6 +4059,9 @@ class Script(scripts.Script):
         type_deepbooru,
         use_same_seed,
         use_cache,
+        only_poses,
+        strip_clothing,
+        names_all_boorus,
         api_key,
         user_id,
         save_credentials,
@@ -3697,7 +4103,9 @@ class Script(scripts.Script):
             if use_deepbooru:
 
                 tagged_prompts = self.use_autotagger(
-                    'deepbooru'
+                    'deepbooru',
+                    only_poses,
+                    strip_clothing
                 )
 
                 if isinstance(p.prompt, list):
@@ -3820,7 +4228,9 @@ class Script(scripts.Script):
 
     def use_autotagger(
         self,
-        model
+        model,
+        only_poses=False,
+        strip_clothing=False
     ):
         """
         Use the autotagger to tag the images
@@ -3860,10 +4270,27 @@ class Script(scripts.Script):
                 orig_prompt
             ):
 
+                deepbooru_tags = deepbooru.model.tag_multi(img)
+
+                # Interrogated tags bypass the booru cleaning loop.
+                if only_poses or strip_clothing:
+                    deepbooru_tags = ', '.join(
+                        tag.strip()
+                        for tag in filter_pose_tags(
+                            deepbooru_tags.split(','),
+                            strip_traits=only_poses,
+                            strip_clothing=strip_clothing,
+                            # Deepbooru emits Danbooru tag names.
+                            names=pose_name_tags,
+                            qualifiers=pose_name_qualifiers
+                        )
+                        if tag.strip()
+                    )
+
                 final_prompts.append(
                     prompt
                     + ','
-                    + deepbooru.model.tag_multi(img)
+                    + deepbooru_tags
                 )
 
             deepbooru.model.stop()
