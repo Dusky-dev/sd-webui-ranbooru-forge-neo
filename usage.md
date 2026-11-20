@@ -55,7 +55,7 @@ Enable `Only poses` to keep the composition of the random posts (pose, action, e
 
 Tags from Danbooru's posture, gestures, hands, sexual positions, face (expressions), image composition, focus and character count [tag groups](https://danbooru.donmai.us/wiki_pages/tag_groups) are never removed, so `closed_eyes`, `looking_back`, `hand_in_own_hair` and `skirt_lift` stay.
 
-Both options also apply to tags added by Deepbooru (including the name list, since Deepbooru outputs Danbooru tag names). The lists use Danbooru's tag names, which Gelbooru, Safebooru and most other boorus share; e621 uses its own vocabulary; its body-colour tags (`blue_fur`, `white_body`) are handled, but expect more misses there (e.g. `arm_tuft`, `tail_markings`). Anything that gets through can be removed with **Tags to remove (post)**.
+Both options also apply to tags added by Deepbooru (including the name list, since Deepbooru outputs Danbooru tag names). The lists use Danbooru's tag names, which Gelbooru, Safebooru and most other boorus share; e621 uses its own vocabulary, so e621 posts also get e621-specific lists built from e621's own [tag groups](https://e621.net/wiki_pages/tag_groups) (anatomy, weight, markings; pose, facial expressions and touching are never removed). These cover tufts, markings, pawpads, countershading, tail and ear shapes and body weight. Body-plan tags such as `anthro`, `feral` and `biped` are kept. Anything that gets through can be removed with **Tags to remove (post)**.
 
 The lists live in `pose_tag_groups.json` and `pose_name_tags.json`. To refresh them from Danbooru, run `python tools/build_pose_tag_groups.py` (or add `groups` / `names` to rebuild one file).
 

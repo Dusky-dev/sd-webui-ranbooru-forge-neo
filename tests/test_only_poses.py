@@ -151,6 +151,19 @@ class TestOnlyPoses(unittest.TestCase):
         for tag in self.groups['keep']:
             self.assertFalse(self.is_char(tag, True, True, qualifiers=q), tag)
 
+    def test_e621_vocabulary_only_on_e621(self):
+        for tag in ('arm_tuft', 'tail_markings', 'inner_ear_fluff', 'dipstick_tail',
+                    'pawpads', 'tan_pawpads', 'countershade_torso', 'striped_tail',
+                    'socks_(marking)', 'two_tone_fur', 'slightly_chubby', 'snout'):
+            self.assertTrue(self.is_char(tag, e621_vocab=True), tag)
+            self.assertFalse(self.is_char(tag), tag)
+        for tag in ('spread_wings', 'clenched_teeth', 'tongue_out', 'feet', 'tongue',
+                    'belly', 'fur', 'hand_on_hip', 'stick_in_tail', 'object_in_tail',
+                    'holding_tail', 'tail_wagging', 'looking_back', 'eyes_closed'):
+            self.assertFalse(self.is_char(tag, e621_vocab=True), tag)
+        for tag in self.groups['e621_keep']:
+            self.assertFalse(self.is_char(tag, True, True, e621_vocab=True), tag)
+
     def test_name_list_switch(self):
         names_for = self.pose_names_for
         names = frozenset({'hatsune_miku'})

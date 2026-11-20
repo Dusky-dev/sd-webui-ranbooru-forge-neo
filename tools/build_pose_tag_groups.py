@@ -5,6 +5,7 @@ Run manually when the lists need refreshing:
     python tools/build_pose_tag_groups.py          # both files
     python tools/build_pose_tag_groups.py groups   # pose_tag_groups.json only
     python tools/build_pose_tag_groups.py names    # pose_name_tags.json only
+    python tools/build_pose_tag_groups.py e621     # e621_* keys only
 
 pose_tag_groups.json comes from the tag group wiki pages; pose_name_tags.json
 holds Danbooru's most-used character, copyright and artist names, used on
@@ -176,8 +177,124 @@ def heading_name(raw):
     return ' '.join(text.strip().lower().split())
 
 
-def fetch_json(url):
-    request = Request(url, headers={'User-Agent': 'ranbooru-tag-group-builder'})
+E621_WIKI_URL = 'https://e621.net/wiki_pages/{}.json'
+E621_USER_AGENT = 'Ranbooru-Forge-Neo/1.0 (tag prompt extension)'
+
+# e621 uses its own vocabulary (tufts, markings, pawpads), so it gets its own
+# lists, applied only to e621 posts. Bare body parts (tongue, feet, belly) are
+# never stripped: they often carry the pose.
+E621_TRAIT_GROUPS = {
+    'anatomy': [
+        'per properties', 'color type description', 'skin color patterns',
+        'hair', 'head and neck', 'ears', 'eyes', 'nose', 'mouth', 'lips',
+        'teeth', 'torso', 'breasts', 'alternatives', 'arms', 'wings', 'shape',
+        'feet', 'tail', 'buttocks', 'other',
+    ],
+    'weight': ['body weight', 'body parts'],
+    'markings': ['colors', 'by location', 'by body composition', 'other',
+                 'scars', 'tattoos'],
+}
+E621_KEEP_GROUPS = {'pose': ALL, 'facial_expressions': ALL, 'touching': ALL}
+E621_NEVER_STRIP = {
+    'body', 'fur', 'scales', 'feathers', 'skin', 'hair', 'head', 'eyes',
+    'ears', 'nose', 'mouth', 'lips', 'tongue', 'teeth', 'torso', 'belly',
+    'navel', 'collarbone', 'breasts', 'nipples', 'arms', 'fingers', 'legs',
+    'feet', 'toes', 'butt', 'human', 'insect', 'reptile', 'dragon',
+    'dolphin', 'amphibian', 'crustacean', 'bare_chest', 'skindentation',
+    'wet_body', 'glistening_body', 'tears', 'eyebrows',
+}
+# Common e621 body tags the group pages miss (from a live leak check).
+E621_EXTRA_TRAITS = {
+    'tuft', 'head_tuft', 'cheek_tuft', 'facial_tuft', 'neck_tuft',
+    'chest_tuft', 'arm_tuft', 'shoulder_tuft', 'leg_tuft', 'tail_tuft',
+    'elbow_tufts', 'inner_ear_fluff', 'ear_tuft', 'fluffy', 'fluffy_tail',
+    'fluffy_ears', 'dipstick_tail', 'dipstick_ears', 'snout', 'muzzle',
+    'black_nose', 'pink_nose', 'brown_nose', 'red_nose', 'whiskers',
+    'pawpads', 'pink_pawpads', 'black_pawpads', 'markings', 'tail_markings',
+    'countershading', 'stripes', 'spots', 'athletic', 'athletic_male',
+    'athletic_female', 'athletic_anthro', 'muscular_anthro', 'muscular_male',
+    'muscular_female', 'curvy_figure', 'voluptuous', 'bottom_heavy',
+    'pear-shaped_figure', 'hourglass_figure', 'overweight_anthro',
+    'huge_thighs', 'thick_thighs', 'wide_hips', 'big_belly', 'biceps',
+    'abs', 'pecs', 'big_pecs', '2_horns', '3_fingers', '4_fingers',
+    '5_fingers', '3_toes', '4_toes', '5_toes', 'mane', 'hooves', 'beak',
+    'tail_feathers', 'head_crest', 'frill_(anatomy)', 'fin', 'fins',
+    'hair_over_eye',
+}
+E621_EXTRA_TRAITS |= {
+    f'{tone}_{part}'
+    for tone in ('two_tone', 'multicolored', 'multi_tone', 'gradient', 'tricolor')
+    for part in ('body', 'fur', 'scales', 'feathers', 'skin', 'hair', 'tail', 'ears')
+}
+
+E621_LINK = re.compile(r'\[\[([^\]|#][^\]|]*)(?:\|[^\]]*)?\]\]')
+E621_HEADING = re.compile(r'^h\d\.\s*(.+)$')
+
+
+def e621_heading_name(raw):
+    """'[#anchor] [[Hair]]:' / '[b]Primary:[/b] [[#top|^]]' -> plain heading."""
+    text = re.sub(r'\[\[#[^\]]*\]\]', '', raw)
+    text = re.sub(r'\[#[^\]]*\]', '', text)
+    text = re.sub(r'\[/?b\]', '', text)
+    text = heading_name(text)
+    return text.strip().rstrip(':^').strip()
+
+
+def e621_sections(body):
+    current, tags = '', []
+    for line in body.splitlines():
+        match = E621_HEADING.match(line.strip())
+        if match:
+            yield current, tags
+            current, tags = e621_heading_name(match.group(1)), []
+        for title in E621_LINK.findall(line):
+            if ':' in title:
+                continue
+            tags.append(normalize(title))
+    yield current, tags
+
+
+def build_e621():
+    bodies = {}
+    for group in sorted(set(E621_TRAIT_GROUPS) | set(E621_KEEP_GROUPS)):
+        bodies[group] = fetch_json(E621_WIKI_URL.format(quote(f'tag_group:{group}')),
+                                   E621_USER_AGENT)['body']
+        time.sleep(0.6)
+
+    def pick(config):
+        found = set()
+        for group, wanted in config.items():
+            seen = set()
+            for heading, tags in e621_sections(bodies[group]):
+                seen.add(heading)
+                if heading in SKIPPED:
+                    continue
+                if wanted is ALL or heading in wanted:
+                    found.update(tags)
+            if wanted is not ALL:
+                for missing in sorted(set(wanted) - seen):
+                    print(f'warning: e621 {group}: no section {missing!r}', file=sys.stderr)
+        return found
+
+    keep = (pick(E621_KEEP_GROUPS) - E621_EXTRA_TRAITS) | E621_NEVER_STRIP
+    traits = pick(E621_TRAIT_GROUPS) | E621_EXTRA_TRAITS
+    overlap = sorted(traits & keep)
+    if overlap:
+        print('e621 traits kept because a keep group lists them: '
+              + ', '.join(overlap), file=sys.stderr)
+
+    data = json.loads(OUTPUT.read_text(encoding='utf-8'))
+    data['e621_source'] = 'https://e621.net/wiki_pages/tag_groups'
+    data['e621_traits'] = sorted(t for t in traits - keep if not is_action(t))
+    data['e621_keep'] = sorted(keep)
+    OUTPUT.write_text(json.dumps(data, indent=1, ensure_ascii=False) + '\n',
+                      encoding='utf-8')
+    print(f"wrote e621 lists to {OUTPUT}: {len(data['e621_traits'])} trait, "
+          f"{len(data['e621_keep'])} keep tags")
+
+
+def fetch_json(url, user_agent='ranbooru-tag-group-builder'):
+    request = Request(url, headers={'User-Agent': user_agent})
     with urlopen(request, timeout=30) as response:
         return json.load(response)
 
@@ -281,6 +398,10 @@ def build_groups():
             print(f'{label} tags kept because a keep group lists them: '
                   + ', '.join(overlap), file=sys.stderr)
 
+    try:
+        previous = json.loads(OUTPUT.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        previous = {}
     data = {
         'source': 'https://danbooru.donmai.us/wiki_pages/tag_groups',
         'generated': time.strftime('%Y-%m-%d'),
@@ -288,6 +409,8 @@ def build_groups():
         'clothing': sorted(t for t in clothing - keep - traits if not is_action(t)),
         'keep': sorted(keep),
     }
+    # The e621 lists are rebuilt separately (target 'e621'); keep them.
+    data.update({k: v for k, v in previous.items() if k.startswith('e621_')})
     OUTPUT.write_text(json.dumps(data, indent=1, ensure_ascii=False) + '\n',
                       encoding='utf-8')
     print(f"wrote {OUTPUT}: {len(data['traits'])} trait, "
@@ -296,13 +419,15 @@ def build_groups():
 
 def main():
     target = sys.argv[1] if len(sys.argv) > 1 else 'all'
-    if target not in ('all', 'groups', 'names'):
-        sys.exit('usage: build_pose_tag_groups.py [all|groups|names]')
+    if target not in ('all', 'groups', 'names', 'e621'):
+        sys.exit('usage: build_pose_tag_groups.py [all|groups|names|e621]')
     # Names first: the keep set is built without them.
     if target in ('all', 'names'):
         build_names()
     if target in ('all', 'groups'):
         build_groups()
+    if target in ('all', 'e621'):
+        build_e621()
 
 
 if __name__ == '__main__':

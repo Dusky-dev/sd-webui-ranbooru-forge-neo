@@ -444,6 +444,22 @@ POSE_CREATURE_TRAIT_NOUNS = frozenset((
     'ears', 'tail', 'tails', 'horns', 'horn', 'wings', 'halo', 'girl', 'boy',
 ))
 
+# e621-only fallback: colour/pattern + body noun (tan_pawpads, striped_tail).
+POSE_E621_BODY_NOUNS = frozenset((
+    'pawpads', 'claws', 'markings', 'stripes', 'spots', 'scales',
+    'countershading', 'inner_ear', 'eyelids', 'mustache', 'facial_hair',
+    'beard', 'face', 'head', 'ears', 'tail', 'nose', 'muzzle', 'fur', 'body',
+    'hair', 'horns', 'antlers', 'wings', 'feathers', 'hands', 'feet', 'paws',
+    'hooves', 'mane', 'beak', 'tongue', 'sclera', 'pupils', 'eyes',
+))
+POSE_E621_BODY_MODIFIERS = POSE_COLOR_WORDS | frozenset((
+    'two', 'tone', 'multi', 'striped', 'spotted', 'hand', 'foot', 'tan',
+    'tricolor', 'big', 'long', 'short', 'small', 'fluffy', 'scut', 'ghost',
+    'dipstick', 'curled', 'prehensile', 'spiked', 'ventral',
+))
+POSE_E621_BODY_PREFIXES = ('countershade_',)
+POSE_E621_BODY_SUFFIXES = ('_tuft', '_tufts', '_markings', '_marking', '_pawpads')
+
 POSE_CLOTHING_MODIFIERS = POSE_COLOR_WORDS | frozenset((
     'long', 'short', 'mini', 'micro', 'pencil', 'pleated', 'frilled',
     'striped', 'vertical-striped', 'plaid', 'checkered', 'polka', 'dot',
@@ -474,7 +490,8 @@ POSE_CATEGORY_FIELDS = (
 
 POSE_EMPTY_GROUPS = {
     'traits': frozenset(), 'clothing': frozenset(), 'keep': frozenset(),
-    'clothing_nouns': frozenset(),
+    'clothing_nouns': frozenset(), 'e621_traits': frozenset(),
+    'e621_keep': frozenset(),
 }
 
 
@@ -487,7 +504,7 @@ def load_pose_tag_groups(path):
             name: frozenset(
                 tag for tag in data.get(name, []) if isinstance(tag, str)
             )
-            for name in ('traits', 'clothing', 'keep')
+            for name in ('traits', 'clothing', 'keep', 'e621_traits', 'e621_keep')
         }
     except (OSError, ValueError, AttributeError, TypeError) as exc:
         print(f'[Ranbooru] Only Poses tag lists unavailable ({exc}); '
@@ -570,8 +587,13 @@ def _matches_structure(words, nouns, modifiers):
 
 
 def is_characteristic_tag(tag, strip_traits=True, strip_clothing=False,
-                          excluded=(), groups=None, names=(), qualifiers=()):
-    """Whether Only Poses / clothing stripping should remove this tag."""
+                          excluded=(), groups=None, names=(), qualifiers=(),
+                          e621_vocab=False):
+    """Whether Only Poses / clothing stripping should remove this tag.
+
+    e621_vocab adds e621's own body vocabulary (tufts, markings, pawpads)
+    and its pose/expression keep list; it is set only for e621 posts.
+    """
     if groups is None:
         groups = pose_tag_groups
     norm = _normalize_pose_tag(tag)
@@ -583,11 +605,21 @@ def is_characteristic_tag(tag, strip_traits=True, strip_clothing=False,
         return True
     if norm in groups['keep']:
         return False
+    if e621_vocab and norm in groups['e621_keep']:
+        return False
     words = norm.split('_')
 
     if strip_traits:
         # Danbooru name list (character/copyright/artist), when enabled.
         if norm in names or has_series_qualifier(norm, qualifiers):
+            return True
+        if e621_vocab and (
+            norm in groups['e621_traits']
+            or norm.startswith(POSE_E621_BODY_PREFIXES)
+            or norm.endswith(POSE_E621_BODY_SUFFIXES)
+            or _matches_structure(words, POSE_E621_BODY_NOUNS,
+                                  POSE_E621_BODY_MODIFIERS)
+        ):
             return True
         if norm in groups['traits']:
             return True
@@ -607,14 +639,16 @@ def is_characteristic_tag(tag, strip_traits=True, strip_clothing=False,
 
 
 def filter_pose_tags(tags, strip_traits=True, strip_clothing=False,
-                     excluded=(), groups=None, names=(), qualifiers=()):
+                     excluded=(), groups=None, names=(), qualifiers=(),
+                     e621_vocab=False):
     """Return the tags (in order) that survive Only Poses / clothing stripping."""
     if not strip_traits and not strip_clothing:
         return list(tags)
     return [
         tag for tag in tags
         if not is_characteristic_tag(tag, strip_traits, strip_clothing,
-                                     excluded, groups, names, qualifiers)
+                                     excluded, groups, names, qualifiers,
+                                     e621_vocab)
     ]
 
 
@@ -3609,7 +3643,8 @@ class Script(scripts.Script):
                     strip_clothing=strip_clothing,
                     excluded=pose_excluded_tags,
                     names=pose_names,
-                    qualifiers=pose_qualifiers
+                    qualifiers=pose_qualifiers,
+                    e621_vocab=isinstance(api_url, e621)
                 )
 
                 new_prompt = ', '.join(tag.strip() for tag in prompt_tags if tag.strip())
