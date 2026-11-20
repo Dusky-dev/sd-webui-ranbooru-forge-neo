@@ -42,11 +42,11 @@ Gelbooru (since June 2025) and Rule34 require an API key and user ID; e621 works
 - **Change Color**: This tries to change the color of the parsed tags by adding or removing specific tags
 - **Sorting Order**: This orders the result of the scraped pictures by high or low score and make it more or less likely to get a high or low score picture. This is applied AFTER the results are scraped, because you cannot use the API to search for high ranking pictures.
 - **Use img2img**: This uses not only the tags from the random image, but also the original picture to generate the final result. Ranbooru first runs a 1-step throwaway pass, then a real img2img pass on the booru image(s) with your prompt, sampler, scheduler, CFG, seed, styles and setting overrides (such as clip skip). Other extensions (ADetailer, hires fix) do not run on that second pass.
-- **Send to ControlNet** (with Use img2img): Sends the first booru image to **ControlNet Unit 1** of Forge Neo's built-in ControlNet instead of running img2img. Choose the model and preprocessor in Unit 1; Ranbooru enables the unit and supplies the image, and the Denoising slider sets the unit's weight. No dummy image is needed.
+- **Send to ControlNet** (with Use img2img): Sends the first booru image to **ControlNet Unit 1** of Forge Neo's built-in ControlNet instead of running img2img. Choose the model and preprocessor in Unit 1; Ranbooru enables the unit and supplies the image, and the Denoising slider sets the unit's weight, so you shouldn't need a dummy image.
 - **Denoising Strength**: This is the strength of the denoising filter. The higher the value, the more the picture will change from the original.
 - **Use last image as img2img** This uses the same picture for all the img2img generations in the same batch.
 - **Crop Center**: This crops the parsed images to the center before processing. This is useful if you want to keep the width/height you set.
-- **Use Cache**: This uses the cached version of the page once it has been used. This improves the speed of the search, but it can return the same results if the cache is not cleared.
+- **Use Cache**: This uses the cached version of the page once it has been used. This improves the speed of the search, but it can return the same results if the cache is not cleared. Cached replies last an hour and are shared between logged-in and anonymous requests, so after adding or changing an API key (Rule34, e621) turn Use cache off for one generation.
 
 ## How to use
 Check the usage.md file for a detailed explanation of how to use the extension.  
