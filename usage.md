@@ -45,5 +45,15 @@ By enabling `Mix prompts` each image will be created using a mixture of N differ
 By enabling `Chaos Mode` each image will have an amount of tags moved to the negative prompt. The amount is defined by the `Chaos Amount` parameter, for example 0.5 means 50% of the tags will be moved to the negative prompt. Using the `Less Chaos` option won't move the tags you manually insert in the negative prompt.
 ### Negative Mode
 By enabling `Negative Mode` each image will have all tags moved to the negative prompt.
+### Only Poses
+Enable `Only poses` to keep the composition of the random posts (pose, action, expression, camera angle, subject count like `1girl`) while removing the tags that describe *who* is in the picture:
+- **Appearance:** hair colour, length and style (`long_hair`, `twintails`, `blunt_bangs`), eye colour (`blue_eyes`), skin, body type (`large_breasts`), animal ears, tails, horns and wings.
+- **Character, copyright and artist names:** removed using the booru's own tag categories on **Danbooru, AIBooru and e621** (e621 species tags are removed too). Other boorus don't report tag categories in their post data, so there only `*_(artist)` and `*_(cosplay)` tags are caught. Add any names that get through to **Tags to remove (post)** or a remove file.
+
+Pose and expression tags are kept even when they mention a body part: `closed_eyes`, `covering_eyes`, `hand_in_own_hair` and `holding_own_tail` are not removed.
+
+`Strip clothing & accessories` is a separate toggle. It works with or without `Only poses` and removes outfits, legwear, footwear, headwear, hair ornaments, jewelry and glasses (`white_shirt`, `pleated_skirt`, `school_uniform`, `hair_ribbon`). Clothing-based actions such as `skirt_lift` or `hand_in_pocket` are kept.
+
+Both options also apply to tags added by Deepbooru. The tag lists are best-effort: anything they miss can be removed with **Tags to remove (post)**.
 ### LoRAnado
 By enabling `Use LoRAnado` you can add random LoRAs to the prompt. This can lead to interesting results. Once you have enabled the option you have to choose a folder from your LoRA path, this can be your main folder or any subfolder (right now only the LoRAs contained in the set folder will be used, not the ones in other subfolders). You now need to set the min and max weight values you want to generate and the amount of random LoRAs to use. You can also set custom weights for each LoRA by separating them with a comma (e.g. 0.2,0.3,0.5). If you want to use the same LoRAs of the previous generation, enable `Lock Previous LoRAs`.

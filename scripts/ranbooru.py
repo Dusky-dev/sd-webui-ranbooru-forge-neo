@@ -166,6 +166,8 @@ RANBOORU_STATE_FIELDS = (
     'type_deepbooru',
     'use_same_seed',
     'use_cache',
+    'only_poses',
+    'strip_clothing',
     'save_credentials',
 )
 
@@ -399,6 +401,204 @@ BW_BG = [
     'greyscale',
     'grayscale'
 ]
+
+# --- Only Poses mode ---------------------------------------------------------
+# Characteristic tags are matched structurally: a known noun (hair, eyes, skirt)
+# preceded ONLY by known modifier words (colours, lengths, styles). Substring
+# wildcards are deliberately avoided: '*_eyes' would also delete pose tags such
+# as closed_eyes or covering_eyes, which this mode must keep.
+POSE_COLOR_WORDS = frozenset((
+    'aqua', 'black', 'blonde', 'blue', 'brown', 'green', 'grey', 'gray',
+    'orange', 'pink', 'purple', 'red', 'silver', 'white', 'yellow', 'gold',
+    'golden', 'beige', 'teal', 'cyan', 'magenta', 'violet', 'lavender',
+    'light', 'dark', 'pale', 'platinum', 'strawberry', 'ash', 'rainbow',
+    'multicolored', 'two-tone', 'gradient', 'streaked', 'split-color',
+    'colored', 'tan', 'tanned', 'olive', 'maroon', 'navy', 'crimson',
+))
+
+POSE_TRAIT_MODIFIERS = POSE_COLOR_WORDS | frozenset((
+    # hair length and style
+    'long', 'short', 'medium', 'very', 'absurdly', 'shoulder-length',
+    'wavy', 'curly', 'straight', 'messy', 'spiked', 'spiky', 'drill',
+    'fluffy', 'thick', 'big', 'huge', 'low', 'high', 'side', 'twin',
+    'single', 'double', 'french', 'crown', 'multiple', 'tied', 'braided',
+    'blunt', 'swept', 'parted', 'asymmetrical', 'inner', 'hair', 'pointy',
+    'sidecut', 'undercut', 'bowl', 'hime', 'bob', 'pixie', 'symbol-shaped',
+    'heart-shaped', 'star-shaped', 'slit', 'glowing', 'sparkling',
+    # body size
+    'small', 'large', 'gigantic', 'flat', 'wide', 'muscular', 'toned',
+    # animal / fantasy parts (ears, tails, wings, horns)
+    'animal', 'cat', 'dog', 'fox', 'wolf', 'rabbit', 'bunny', 'mouse',
+    'horse', 'cow', 'sheep', 'goat', 'tiger', 'lion', 'bear', 'raccoon',
+    'squirrel', 'monkey', 'pig', 'deer', 'dragon', 'demon', 'devil',
+    'angel', 'bat', 'bird', 'feathered', 'fairy', 'insect', 'butterfly',
+    'fish', 'shark', 'snake', 'lizard', 'elf', 'oni', 'kitsune',
+    'curled', 'mechanical', 'fake', 'extra', 'fur',
+    'dark-skinned', 'light-skinned',
+))
+
+# Nouns that are characteristics only with a modifier: 'long_hair' goes,
+# while 'hair', 'eyes' or 'breasts' alone stay.
+POSE_TRAIT_NOUNS = frozenset((
+    'hair', 'eyes', 'skin', 'eyebrows', 'eyelashes', 'pupils', 'sclera',
+    'irises', 'ears', 'tail', 'tails', 'wings', 'horns', 'horn', 'bangs',
+    'ponytail', 'twintails', 'braid', 'braids', 'bun', 'buns', 'hair_bun',
+    'sidelocks', 'drills', 'ringlets', 'cut', 'breasts', 'thighs', 'hips',
+    'female', 'male', 'girl', 'boy', 'lips',
+))
+
+# Tags removed outright.
+POSE_TRAIT_TAGS = frozenset((
+    'tail', 'animal_ears', 'animal_ear_fluff', 'ahoge', 'antenna_hair',
+    'twintails', 'ponytail', 'braid', 'twin_braids', 'sidelocks', 'bangs',
+    'hair_intakes', 'hair_flaps', 'hair_between_eyes', 'hair_over_one_eye',
+    'hair_over_eyes', 'hair_over_shoulder', 'hair_behind_ear', 'hair_bun',
+    'drill_hair', 'ringlets', 'hime_cut', 'bob_cut', 'pixie_cut', 'bald',
+    'heterochromia', 'freckles', 'mole', 'mole_under_eye', 'mole_under_mouth',
+    'mole_on_breast', 'beauty_mark', 'facial_mark', 'whisker_markings',
+    'scar', 'scar_on_face', 'scar_across_eye', 'facial_hair', 'beard',
+    'mustache', 'stubble', 'fang', 'fangs', 'skin_fang', 'sharp_teeth',
+    'flat_chest', 'abs', 'muscular', 'petite', 'curvy', 'plump', 'toned',
+    'thick_thighs', 'wide_hips', 'horns', 'single_horn', 'wings', 'halo',
+    'pointy_ears', 'elf', 'tan', 'tanlines', 'dark_skin', 'pale_skin',
+    'colored_skin', 'eyelashes', 'eyebrows_visible_through_hair',
+    'eyes_visible_through_hair', 'hair_ears', 'kemonomimi_mode',
+))
+
+POSE_CLOTHING_MODIFIERS = POSE_COLOR_WORDS | frozenset((
+    'long', 'short', 'mini', 'micro', 'pencil', 'pleated', 'frilled',
+    'striped', 'plaid', 'checkered', 'polka', 'dot', 'print', 'floral',
+    'lace', 'leather', 'latex', 'denim', 'fur', 'see-through', 'sheer',
+    'sleeveless', 'strapless', 'backless', 'halterneck', 'off-shoulder',
+    'detached', 'wide', 'puffy', 'juliet', 'open',
+    'unbuttoned', 'torn', 'cropped', 'high-waist', 'side-tie', 'string',
+    'competition', 'one-piece', 'school', 'sailor', 'maid', 'gothic',
+    'lolita', 'military', 'santa', 'witch', 'baseball', 'peaked', 'top',
+    'sun', 'straw', 'cowboy', 'hair', 'thigh', 'knee', 'ankle', 'elbow',
+    'fingerless', 'bridal', 'wedding', 'evening', 'china', 'chinese',
+    'japanese', 'single', 'mismatched', 'hooded', 'cross', 'neck', 'mob', 'beret', 'wrist', 'ear', 'x', 'flower', 'star',
+    'heart', 'gym', 'sports', 'race', 'naval', 'nurse', 'police', 'tank',
+    'crop', 'tube', 'turtleneck', 'sweater', 'bow', 'ribbon', 'animal',
+    'cat', 'rabbit', 'bunny', 'fake', 'round', 'rimless', 'semi-rimless',
+    'red-framed', 'black-framed', 'high', 'low', 'thick', 'arm', 'leg',
+    'garter', 'tight', 'loose', 'oversized', 'collared', 'sleeved',
+    'double-breasted', 'buttoned', 'zipped', 'shiny', 'wet', 'transparent',
+))
+
+POSE_CLOTHING_NOUNS = frozenset((
+    'shirt', 't-shirt', 'blouse', 'skirt', 'miniskirt', 'dress', 'sundress',
+    'jacket', 'coat', 'vest', 'hoodie', 'sweater', 'cardigan', 'blazer',
+    'shorts', 'pants', 'jeans', 'leggings', 'thighhighs', 'kneehighs',
+    'pantyhose', 'legwear', 'socks', 'stockings', 'shoes', 'boots',
+    'sandals', 'sneakers', 'loafers', 'high_heels', 'footwear', 'gloves',
+    'elbow_gloves', 'mittens', 'hat', 'cap', 'beret', 'headwear', 'hood',
+    'headband', 'hairband', 'headdress', 'headpiece', 'tiara', 'crown',
+    'veil', 'helmet', 'hair_ornament', 'hair_ribbon', 'hair_bow',
+    'hair_flower', 'hairclip', 'hairpin', 'scrunchie', 'ribbon', 'bow',
+    'bowtie', 'necktie', 'tie', 'ascot', 'neckerchief', 'scarf', 'collar',
+    'sailor_collar', 'choker', 'necklace', 'pendant', 'earrings',
+    'bracelet', 'jewelry', 'ring', 'brooch', 'belt', 'sash', 'obi',
+    'apron', 'uniform', 'serafuku', 'kimono', 'yukata', 'hakama',
+    'cheongsam', 'leotard', 'bodysuit', 'swimsuit', 'bikini', 'underwear',
+    'panties', 'bra', 'lingerie', 'garter_straps', 'garter_belt',
+    'fishnets', 'armor', 'cape', 'capelet', 'cloak', 'robe', 'sleeves',
+    'glasses', 'eyewear', 'sunglasses', 'goggles', 'eyepatch', 'mask',
+    'headphones', 'earmuffs', 'wristband', 'wrist_cuffs', 'armband',
+    'tank_top', 'crop_top', 'tube_top', 'overalls', 'bloomers', 'buruma',
+    'clothes', 'clothing', 'outfit', 'costume', 'nail_polish', 'frills',
+    'buttons', 'shirt_collar', 'turtleneck', 'zettai_ryouiki', 'pasties',
+))
+
+POSE_CLOTHING_TAGS = frozenset((
+    'school_uniform', 'maid', 'serafuku', 'zettai_ryouiki', 'gakuran',
+    'playboy_bunny', 'detached_collar', 'long_sleeves', 'short_sleeves',
+    'sleeveless', 'wide_sleeves', 'puffy_sleeves', 'detached_sleeves',
+    'sleeves_past_wrists', 'sleeves_past_fingers', 'bare_shoulders',
+    'off_shoulder', 'cleavage_cutout', 'clothing_cutout', 'jewelry',
+    'maid_headdress', 'maid_apron', 'frilled_apron',
+))
+
+# Generic fallbacks for boorus whose posts carry no tag categories.
+POSE_QUALIFIER_SUFFIXES = ('_(artist)', '_(cosplay)')
+
+# Booru post fields listing the artist, character and copyright tags.
+POSE_CATEGORY_FIELDS = (
+    'tag_string_artist', 'tag_string_character', 'tag_string_copyright'
+)
+
+
+def _normalize_pose_tag(tag):
+    """Compare tags in booru form: lower case, underscores, unescaped parens."""
+    tag = tag.strip().lower().replace('\\(', '(').replace('\\)', ')')
+    return '_'.join(tag.split())
+
+
+def _matches_structure(words, nouns, modifiers, require_modifier):
+    """True when the tag ends with a noun and every word before it is a modifier."""
+    for size in (3, 2, 1):
+        if len(words) < size:
+            continue
+        if '_'.join(words[-size:]) not in nouns:
+            continue
+        prefix = words[:-size]
+        if require_modifier and not prefix:
+            continue
+        if all(
+            word in modifiers or word.endswith(('-trimmed', '-colored', '-shaped', '-print', '-framed', '-skinned'))
+            for word in prefix
+        ):
+            return True
+    return False
+
+
+def is_characteristic_tag(tag, strip_traits=True, strip_clothing=False, excluded=()):
+    """Whether Only Poses mode should strip this tag from a booru prompt."""
+    norm = _normalize_pose_tag(tag)
+    if not norm:
+        return False
+    words = norm.split('_')
+
+    if strip_traits:
+        if norm in excluded or norm.endswith(POSE_QUALIFIER_SUFFIXES):
+            return True
+        if norm in POSE_TRAIT_TAGS:
+            return True
+        if _matches_structure(words, POSE_TRAIT_NOUNS, POSE_TRAIT_MODIFIERS, True):
+            return True
+
+    if strip_clothing:
+        if norm in POSE_CLOTHING_TAGS:
+            return True
+        if _matches_structure(words, POSE_CLOTHING_NOUNS, POSE_CLOTHING_MODIFIERS, False):
+            return True
+
+    return False
+
+
+def filter_pose_tags(tags, strip_traits=True, strip_clothing=False, excluded=()):
+    """Return the tags (in order) that survive Only Poses / clothing stripping."""
+    if not strip_traits and not strip_clothing:
+        return list(tags)
+    return [
+        tag for tag in tags
+        if not is_characteristic_tag(tag, strip_traits, strip_clothing, excluded)
+    ]
+
+
+def post_category_tags(post):
+    """Artist, character and copyright tags a booru post reports, normalized."""
+    found = []
+    for field in POSE_CATEGORY_FIELDS:
+        value = post.get(field)
+        if isinstance(value, str):
+            found.extend(value.split())
+    categories = post.get('ranbooru_tag_categories')
+    if isinstance(categories, dict):
+        for values in categories.values():
+            if isinstance(values, list):
+                found.extend(v for v in values if isinstance(v, str))
+    return {_normalize_pose_tag(tag) for tag in found if tag.strip()}
+
 
 POST_AMOUNT = 100
 
@@ -1370,6 +1570,14 @@ class e621(Booru):
                 for sublevel in sublevels:
                     temp_tags.extend(post['tags'][sublevel])
 
+                # Only Poses mode strips these categories (and species).
+                post['ranbooru_tag_categories'] = {
+                    sublevel: post['tags'].get(sublevel, [])
+                    for sublevel in (
+                        'artist', 'copyright', 'character', 'species'
+                    )
+                }
+
                 post['tags'] = ' '.join(temp_tags)
                 post['score'] = post['score']['total']
 
@@ -1856,6 +2064,16 @@ class Script(scripts.Script):
                 value=saved_value('shuffle_tags', True)
             )
 
+            only_poses = gr.Checkbox(
+                label="Only poses (strip appearance, character, copyright & artist tags)",
+                value=saved_value('only_poses', False)
+            )
+
+            strip_clothing = gr.Checkbox(
+                label="Strip clothing & accessories",
+                value=saved_value('strip_clothing', False)
+            )
+
             change_dash = gr.Checkbox(
                 label='Convert "_" to spaces',
                 value=saved_value('change_dash', False)
@@ -2282,6 +2500,8 @@ class Script(scripts.Script):
             type_deepbooru,
             use_same_seed,
             use_cache,
+            only_poses,
+            strip_clothing,
             api_key,
             user_id,
             save_credentials,
@@ -2556,6 +2776,8 @@ class Script(scripts.Script):
         type_deepbooru,
         use_same_seed,
         use_cache,
+        only_poses,
+        strip_clothing,
         api_key,
         user_id,
         save_credentials,
@@ -2963,6 +3185,13 @@ class Script(scripts.Script):
 
             data['post'] = clean_posts
 
+            # Artist/character/copyright tags reported by the booru, gathered
+            # from the whole page so mixed prompts are covered too.
+            pose_excluded_tags = set()
+            if only_poses:
+                for post in clean_posts:
+                    pose_excluded_tags.update(post_category_tags(post))
+
             if not clean_posts:
                 raise ValueError(
                     '[Ranbooru] No posts were returned by the booru API for '
@@ -3172,6 +3401,13 @@ class Script(scripts.Script):
                             if bad_tag.replace('*', '')
                             not in tag
                         ]
+
+                prompt_tags = filter_pose_tags(
+                    prompt_tags,
+                    strip_traits=only_poses,
+                    strip_clothing=strip_clothing,
+                    excluded=pose_excluded_tags
+                )
 
                 new_prompt = ', '.join(tag.strip() for tag in prompt_tags if tag.strip())
 
@@ -3508,7 +3744,9 @@ class Script(scripts.Script):
                 self.last_img = last_img
 
                 tagged_prompts = self.use_autotagger(
-                    'deepbooru'
+                    'deepbooru',
+                    only_poses,
+                    strip_clothing
                 )
 
                 if isinstance(p.prompt, list):
@@ -3656,6 +3894,8 @@ class Script(scripts.Script):
         type_deepbooru,
         use_same_seed,
         use_cache,
+        only_poses,
+        strip_clothing,
         api_key,
         user_id,
         save_credentials,
@@ -3697,7 +3937,9 @@ class Script(scripts.Script):
             if use_deepbooru:
 
                 tagged_prompts = self.use_autotagger(
-                    'deepbooru'
+                    'deepbooru',
+                    only_poses,
+                    strip_clothing
                 )
 
                 if isinstance(p.prompt, list):
@@ -3820,7 +4062,9 @@ class Script(scripts.Script):
 
     def use_autotagger(
         self,
-        model
+        model,
+        only_poses=False,
+        strip_clothing=False
     ):
         """
         Use the autotagger to tag the images
@@ -3860,10 +4104,24 @@ class Script(scripts.Script):
                 orig_prompt
             ):
 
+                deepbooru_tags = deepbooru.model.tag_multi(img)
+
+                # Interrogated tags bypass the booru cleaning loop.
+                if only_poses or strip_clothing:
+                    deepbooru_tags = ', '.join(
+                        tag.strip()
+                        for tag in filter_pose_tags(
+                            deepbooru_tags.split(','),
+                            strip_traits=only_poses,
+                            strip_clothing=strip_clothing
+                        )
+                        if tag.strip()
+                    )
+
                 final_prompts.append(
                     prompt
                     + ','
-                    + deepbooru.model.tag_multi(img)
+                    + deepbooru_tags
                 )
 
             deepbooru.model.stop()
