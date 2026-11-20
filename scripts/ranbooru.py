@@ -168,6 +168,7 @@ RANBOORU_STATE_FIELDS = (
     'use_cache',
     'only_poses',
     'strip_clothing',
+    'names_all_boorus',
     'save_credentials',
 )
 
@@ -497,6 +498,27 @@ def load_pose_tag_groups(path):
     return groups
 
 
+def load_pose_name_tags(path):
+    """Danbooru's most-used character/copyright/artist names, for boorus without tag categories."""
+    try:
+        with open(path, 'r', encoding='utf-8') as names_file:
+            data = json.load(names_file)
+        return frozenset(
+            tag
+            for key in ('copyright', 'character', 'artist')
+            for tag in data.get(key, [])
+            if isinstance(tag, str)
+        )
+    except (OSError, ValueError, AttributeError, TypeError) as exc:
+        print(f'[Ranbooru] Only Poses name list unavailable ({exc}); '
+              'names are only stripped where the booru reports tag categories.')
+        return frozenset()
+
+
+# Boorus that share Danbooru's tag names but report no tag categories.
+POSE_NAME_LIST_BOORUS = ('gelbooru',)
+
+
 def _normalize_pose_tag(tag):
     """Compare tags in booru form: lower case, underscores, unescaped parens."""
     tag = tag.strip().lower().replace('\\(', '(').replace('\\)', ')')
@@ -516,7 +538,7 @@ def _matches_structure(words, nouns, modifiers):
 
 
 def is_characteristic_tag(tag, strip_traits=True, strip_clothing=False,
-                          excluded=(), groups=None):
+                          excluded=(), groups=None, names=()):
     """Whether Only Poses / clothing stripping should remove this tag."""
     if groups is None:
         groups = pose_tag_groups
@@ -532,6 +554,9 @@ def is_characteristic_tag(tag, strip_traits=True, strip_clothing=False,
     words = norm.split('_')
 
     if strip_traits:
+        # Danbooru name list (character/copyright/artist), when enabled.
+        if norm in names:
+            return True
         if norm in groups['traits']:
             return True
         if _matches_structure(words, POSE_COLOR_TRAIT_NOUNS, POSE_COLOR_WORDS):
@@ -550,14 +575,14 @@ def is_characteristic_tag(tag, strip_traits=True, strip_clothing=False,
 
 
 def filter_pose_tags(tags, strip_traits=True, strip_clothing=False,
-                     excluded=(), groups=None):
+                     excluded=(), groups=None, names=()):
     """Return the tags (in order) that survive Only Poses / clothing stripping."""
     if not strip_traits and not strip_clothing:
         return list(tags)
     return [
         tag for tag in tags
         if not is_characteristic_tag(tag, strip_traits, strip_clothing,
-                                     excluded, groups)
+                                     excluded, groups, names)
     ]
 
 
@@ -578,6 +603,9 @@ def post_category_tags(post):
 
 pose_tag_groups = load_pose_tag_groups(
     os.path.join(extension_root, 'pose_tag_groups.json')
+)
+pose_name_tags = load_pose_name_tags(
+    os.path.join(extension_root, 'pose_name_tags.json')
 )
 
 
@@ -2047,13 +2075,19 @@ class Script(scripts.Script):
 
             only_poses = gr.Checkbox(
                 label="Only poses (strip appearance, character, copyright & artist tags)",
-                info="Character/copyright/artist names are detected on Danbooru and AIBooru only",
+                info="Names come from booru tag categories on Danbooru/AIBooru and from Danbooru's top-name list on Gelbooru",
                 value=saved_value('only_poses', False)
             )
 
             strip_clothing = gr.Checkbox(
                 label="Strip clothing & accessories",
                 value=saved_value('strip_clothing', False)
+            )
+
+            names_all_boorus = gr.Checkbox(
+                label="Experimental: strip Danbooru name list on every booru",
+                info="With Only poses, also removes Danbooru's ~35k most-used character, copyright and artist names on boorus other than Gelbooru",
+                value=saved_value('names_all_boorus', False)
             )
 
             change_dash = gr.Checkbox(
@@ -2484,6 +2518,7 @@ class Script(scripts.Script):
             use_cache,
             only_poses,
             strip_clothing,
+            names_all_boorus,
             api_key,
             user_id,
             save_credentials,
@@ -2760,6 +2795,7 @@ class Script(scripts.Script):
         use_cache,
         only_poses,
         strip_clothing,
+        names_all_boorus,
         api_key,
         user_id,
         save_credentials,
@@ -3170,9 +3206,12 @@ class Script(scripts.Script):
             # Artist/character/copyright tags reported by the booru, gathered
             # from the whole page so mixed prompts are covered too.
             pose_excluded_tags = set()
+            pose_names = ()
             if only_poses:
                 for post in clean_posts:
                     pose_excluded_tags.update(post_category_tags(post))
+                if booru in POSE_NAME_LIST_BOORUS or names_all_boorus:
+                    pose_names = pose_name_tags
 
             if not clean_posts:
                 raise ValueError(
@@ -3388,7 +3427,8 @@ class Script(scripts.Script):
                     prompt_tags,
                     strip_traits=only_poses,
                     strip_clothing=strip_clothing,
-                    excluded=pose_excluded_tags
+                    excluded=pose_excluded_tags,
+                    names=pose_names
                 )
 
                 new_prompt = ', '.join(tag.strip() for tag in prompt_tags if tag.strip())
@@ -3878,6 +3918,7 @@ class Script(scripts.Script):
         use_cache,
         only_poses,
         strip_clothing,
+        names_all_boorus,
         api_key,
         user_id,
         save_credentials,
@@ -4095,7 +4136,9 @@ class Script(scripts.Script):
                         for tag in filter_pose_tags(
                             deepbooru_tags.split(','),
                             strip_traits=only_poses,
-                            strip_clothing=strip_clothing
+                            strip_clothing=strip_clothing,
+                            # Deepbooru emits Danbooru tag names.
+                            names=pose_name_tags
                         )
                         if tag.strip()
                     )

@@ -1,8 +1,14 @@
-"""Regenerate pose_tag_groups.json from Danbooru's tag group wiki pages.
+"""Regenerate the Only Poses tag lists from Danbooru.
 
 Run manually when the lists need refreshing:
 
-    python tools/build_pose_tag_groups.py
+    python tools/build_pose_tag_groups.py          # both files
+    python tools/build_pose_tag_groups.py groups   # pose_tag_groups.json only
+    python tools/build_pose_tag_groups.py names    # pose_name_tags.json only
+
+pose_tag_groups.json comes from the tag group wiki pages; pose_name_tags.json
+holds Danbooru's most-used character, copyright and artist names, used on
+boorus whose posts carry no tag categories.
 
 The extension never fetches these pages at runtime; it only reads the JSON.
 Sections are chosen by heading so that pose/expression sections of mixed pages
@@ -17,7 +23,20 @@ from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 WIKI_URL = 'https://danbooru.donmai.us/wiki_pages/{}.json'
-OUTPUT = Path(__file__).resolve().parents[1] / 'pose_tag_groups.json'
+ROOT = Path(__file__).resolve().parents[1]
+OUTPUT = ROOT / 'pose_tag_groups.json'
+NAMES_OUTPUT = ROOT / 'pose_name_tags.json'
+TAGS_URL = ('https://danbooru.donmai.us/tags.json?search[category]={category}'
+            '&search[order]=count&limit=1000&page={page}&only=name')
+# category id, name, how many of the most-used tags to take. Measured on
+# recent Danbooru posts: 5k copyrights cover ~97% of copyright tags, 20k
+# characters ~83%, 10k artists only ~23% (the artist tail is very long).
+NAME_CATEGORIES = ((3, 'copyright', 5000), (4, 'character', 20000),
+                   (1, 'artist', 10000))
+# Short artist names are often ordinary words on other boorus (arf, eco).
+MIN_ARTIST_LENGTH = 5
+# Pose names that Danbooru files as copyrights but are pose tags in practice.
+NAME_KEEP = {'saturday_night_fever'}
 ALL = None  # every section except the SKIPPED ones
 
 SKIPPED = {'see also', 'related tag groups', 'about', 'external links', 'unrelated'}
@@ -138,11 +157,41 @@ def heading_name(raw):
     return ' '.join(text.strip().lower().split())
 
 
-def fetch_body(group):
-    request = Request(WIKI_URL.format(quote(f'tag_group:{group}')),
-                      headers={'User-Agent': 'ranbooru-tag-group-builder'})
+def fetch_json(url):
+    request = Request(url, headers={'User-Agent': 'ranbooru-tag-group-builder'})
     with urlopen(request, timeout=30) as response:
-        return json.load(response)['body']
+        return json.load(response)
+
+
+def fetch_body(group):
+    return fetch_json(WIKI_URL.format(quote(f'tag_group:{group}')))['body']
+
+
+def load_names():
+    """Names from pose_name_tags.json, so the keep set can exclude them."""
+    try:
+        data = json.loads(NAMES_OUTPUT.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return set()
+    return {tag for key in ('copyright', 'character', 'artist')
+            for tag in data.get(key, [])}
+
+
+def build_names():
+    data = {'source': 'https://danbooru.donmai.us/tags', 'generated': time.strftime('%Y-%m-%d')}
+    for category, name, count in NAME_CATEGORIES:
+        tags = []
+        for page in range(1, count // 1000 + 1):
+            tags.extend(row['name'] for row in fetch_json(
+                TAGS_URL.format(category=category, page=page)))
+            time.sleep(0.5)
+        if name == 'artist':
+            tags = [tag for tag in tags if len(tag) >= MIN_ARTIST_LENGTH]
+        data[name] = sorted(set(tags) - NAME_KEEP)
+    NAMES_OUTPUT.write_text(json.dumps(data, indent=0, ensure_ascii=False) + '\n',
+                            encoding='utf-8')
+    print(f'wrote {NAMES_OUTPUT}: ' + ', '.join(
+        f'{len(data[name])} {name}' for _, name, _ in NAME_CATEGORIES))
 
 
 def sections(body):
@@ -172,7 +221,7 @@ def collect(groups, bodies, seen_sections):
     return found
 
 
-def main():
+def build_groups():
     names = sorted(set(TRAIT_GROUPS) | set(CLOTHING_GROUPS) | set(KEEP_GROUPS))
     bodies = {}
     for name in names:
@@ -183,7 +232,9 @@ def main():
     traits = collect(TRAIT_GROUPS, bodies, seen) | EXTRA_TRAITS
     clothing = (collect(CLOTHING_GROUPS, bodies, seen) | EXTRA_CLOTHING) - NOT_CLOTHING
     # Curated extras are deliberate, so they override the keep groups.
-    keep = ((collect(KEEP_GROUPS, bodies, seen) - EXTRA_TRAITS - EXTRA_CLOTHING)
+    # Wiki pages use character names as examples; those are not pose tags.
+    keep = ((collect(KEEP_GROUPS, bodies, seen) - EXTRA_TRAITS - EXTRA_CLOTHING
+             - (load_names() - NAME_KEEP))
             | NEVER_STRIP)
 
     # Report section names that were asked for but not found (wiki edits).
@@ -210,6 +261,17 @@ def main():
                       encoding='utf-8')
     print(f"wrote {OUTPUT}: {len(data['traits'])} trait, "
           f"{len(data['clothing'])} clothing, {len(data['keep'])} keep tags")
+
+
+def main():
+    target = sys.argv[1] if len(sys.argv) > 1 else 'all'
+    if target not in ('all', 'groups', 'names'):
+        sys.exit('usage: build_pose_tag_groups.py [all|groups|names]')
+    # Names first: the keep set is built without them.
+    if target in ('all', 'names'):
+        build_names()
+    if target in ('all', 'groups'):
+        build_groups()
 
 
 if __name__ == '__main__':

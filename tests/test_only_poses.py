@@ -8,8 +8,10 @@ MODULE_PATH = Path(__file__).resolve().parents[1] / 'scripts' / 'ranbooru.py'
 FUNCTIONS = {
     '_normalize_pose_tag', '_matches_structure', 'is_characteristic_tag',
     'filter_pose_tags', 'post_category_tags', 'load_pose_tag_groups',
+    'load_pose_name_tags',
 }
 GROUPS_PATH = MODULE_PATH.parents[1] / 'pose_tag_groups.json'
+NAMES_PATH = MODULE_PATH.parents[1] / 'pose_name_tags.json'
 
 
 def load_pose_filter():
@@ -29,6 +31,7 @@ def load_pose_filter():
     module = ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[]))
     exec(compile(module, str(MODULE_PATH), 'exec'), namespace)
     namespace['pose_tag_groups'] = namespace['load_pose_tag_groups'](str(GROUPS_PATH))
+    namespace['pose_name_tags'] = namespace['load_pose_name_tags'](str(NAMES_PATH))
     return namespace
 
 
@@ -41,6 +44,8 @@ class TestOnlyPoses(unittest.TestCase):
         cls.categories = staticmethod(ns['post_category_tags'])
         cls.load_groups = staticmethod(ns['load_pose_tag_groups'])
         cls.groups = ns['pose_tag_groups']
+        cls.names = ns['pose_name_tags']
+        cls.load_names = staticmethod(ns['load_pose_name_tags'])
 
     def test_strips_appearance_traits(self):
         for tag in (
@@ -107,6 +112,25 @@ class TestOnlyPoses(unittest.TestCase):
         self.assertTrue(self.is_char('cat_tail', groups=empty))
         self.assertFalse(self.is_char('closed_eyes', groups=empty))
         self.assertFalse(self.is_char('white_shirt', True, True, groups=empty))
+
+    def test_name_list_strips_only_when_enabled(self):
+        self.assertGreater(len(self.names), 20000)
+        for tag in ('hatsune_miku', 'touhou', 'genshin_impact', 'hakurei_reimu'):
+            self.assertTrue(self.is_char(tag, names=self.names), tag)
+            self.assertFalse(self.is_char(tag), tag)
+        self.assertTrue(self.is_char(r' kirisame_marisa', names=self.names))
+        # Name tier needs Only poses itself.
+        self.assertFalse(self.is_char('hatsune_miku', False, True, names=self.names))
+
+    def test_name_list_never_hits_keep_or_common_tags(self):
+        self.assertFalse(self.names & self.groups['keep'])
+        for tag in self.groups['keep']:
+            self.assertFalse(self.is_char(tag, True, True, names=self.names), tag)
+        for tag in ('1girl', 'solo', 'sitting', 'smile', 'saturday_night_fever'):
+            self.assertFalse(self.is_char(tag, names=self.names), tag)
+
+    def test_missing_name_list_is_empty(self):
+        self.assertEqual(self.load_names(str(NAMES_PATH) + '.missing'), frozenset())
 
     def test_clothing_only_keeps_traits(self):
         self.assertFalse(self.is_char('long_hair', strip_traits=False, strip_clothing=True))
