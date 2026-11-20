@@ -1691,14 +1691,22 @@ class e621(Booru):
             "&id=" + id
         )
 
-    # Only Poses: posts no longer carry tag categories, so look them up.
+    # Posts no longer carry tag categories, so look them up: meta, lore and
+    # invalid tags never belonged in a prompt (the old adapter skipped those
+    # categories), and Only Poses strips the name categories.
     TAGS_URL = 'https://e621.net/tags.json?limit=320&search[name]='
     NAME_CATEGORIES = {1: 'artist', 3: 'copyright', 4: 'character', 5: 'species'}
+    DROP_CATEGORIES = {6: 'invalid', 7: 'meta', 8: 'lore'}
     LOOKUP_CHUNK = 300
     _category_cache = {}
 
     def name_tags(self, tags):
-        """Artist/copyright/character/species tags among `tags`, via e621's tag API.
+        """Artist/copyright/character/species tags among `tags`."""
+        categories = self.tag_categories(tags)
+        return {t for t, c in categories.items() if c in self.NAME_CATEGORIES}
+
+    def tag_categories(self, tags):
+        """Map each of `tags` to its e621 category id (None when unknown).
 
         Results are cached per tag; on any error the remaining tags are simply
         treated as unknown, so generation never fails because of this lookup.
@@ -1724,7 +1732,7 @@ class e621(Booru):
                     cache[row['name']] = row.get('category')
             for tag in chunk:
                 cache.setdefault(tag, None)
-        return {t for t in set(tags) if cache.get(t) in self.NAME_CATEGORIES}
+        return {t: cache.get(t) for t in set(tags)}
 
 
 def generate_chaos(pos_tags, neg_tags, chaos_amount):
@@ -3509,13 +3517,23 @@ class Script(scripts.Script):
                         )
 
             # e621 posts carry no categories; look up the prompt's tags.
-            if only_poses and isinstance(api_url, e621):
-                pose_excluded_tags.update(api_url.name_tags({
+            e621_dropped_tags = set()
+            if isinstance(api_url, e621):
+                e621_categories = api_url.tag_categories({
                     _normalize_pose_tag(tag)
                     for prompt in prompts
                     for tag in html.unescape(prompt).split(',')
                     if tag.strip()
-                }))
+                })
+                e621_dropped_tags = {
+                    tag for tag, category in e621_categories.items()
+                    if category in e621.DROP_CATEGORIES
+                }
+                if only_poses:
+                    pose_excluded_tags.update(
+                        tag for tag, category in e621_categories.items()
+                        if category in e621.NAME_CATEGORIES
+                    )
 
             new_prompts = []
 
@@ -3540,6 +3558,12 @@ class Script(scripts.Script):
                             if bad_tag.replace('*', '')
                             not in tag
                         ]
+
+                if e621_dropped_tags:
+                    prompt_tags = [
+                        tag for tag in prompt_tags
+                        if _normalize_pose_tag(tag) not in e621_dropped_tags
+                    ]
 
                 prompt_tags = filter_pose_tags(
                     prompt_tags,

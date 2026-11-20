@@ -156,6 +156,17 @@ class E621AdapterTests(unittest.TestCase):
         self.assertEqual(self.adapter.name_tags({'wolf', 'solo'}), {'wolf'})
         self.assertEqual(len(self.requests.calls), 2)
 
+    def test_tag_categories_mark_meta_lore_invalid(self):
+        self.ns['e621']._category_cache.clear()
+        self.requests.responses = [Response([
+            {'name': 'hi_res', 'category': 7}, {'name': 'sibling_(lore)', 'category': 8},
+            {'name': 'tough_guy', 'category': 6}, {'name': 'solo', 'category': 0},
+        ])]
+        cats = self.adapter.tag_categories({'hi_res', 'sibling_(lore)', 'tough_guy', 'solo', 'gone'})
+        drop = {t for t, c in cats.items() if c in self.adapter.DROP_CATEGORIES}
+        self.assertEqual(drop, {'hi_res', 'sibling_(lore)', 'tough_guy'})
+        self.assertIsNone(cats['gone'])
+
     def test_name_tag_lookup_fails_soft(self):
         self.ns['e621']._category_cache.clear()
         self.requests.responses = [ConnectionError('down')]
