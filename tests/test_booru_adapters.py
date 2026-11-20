@@ -10,7 +10,7 @@ import types
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, unquote_plus
 
 
 class Response:
@@ -64,7 +64,8 @@ def moe_post(post_id=1, file_url='https://files.example/a.jpg'):
 
 NAMES = {
     'Booru', 'GelbooruBeta', 'XBooru', 'Safebooru', 'Rule34', 'Moebooru',
-    'Konachan', 'Yandere', 'AIBooru', 'redact_secrets', 'fetch_booru_json',
+    'Konachan', 'AIBooru', 'Danbooru', 'redact_secrets', 'fetch_booru_json',
+    'has_own_order', 'with_search_term', 'random_or_paged',
     'fetch_xml_count', 'pages_for_count', 'parse_post_id',
     'resolve_booru_credentials', 'check_exception',
 }
@@ -100,7 +101,7 @@ class AdapterTestBase(unittest.TestCase):
             self.ranges.append((low, high))
             return high
 
-        self.ns = {'requests': self.requests, 'booru_http': self.requests, 're': re, 'quote_plus': quote_plus,
+        self.ns = {'requests': self.requests, 'booru_http': self.requests, 're': re, 'quote_plus': quote_plus, 'unquote_plus': unquote_plus,
                    'POST_AMOUNT': 100, 'COUNT': 0,
                    'random': types.SimpleNamespace(randint=randint)}
         exec(self.module, self.ns)
@@ -176,19 +177,19 @@ class GelbooruBetaTests(AdapterTestBase):
     def test_max_pages_is_honoured_within_result_count(self):
         # The old loop shrank Max Pages to 1-2; now it is only capped by results.
         self.requests.responses = [count_xml(380_000), Response(data=[dapi_post()], text='[..]')]
-        data, _ = self.quiet(self.ns['XBooru']().get_data, '&tags=1girl', 50)
+        data, _ = self.quiet(self.ns['XBooru']().get_data, '&tags=1girl+sort:score', 50)
         self.assertEqual(self.ranges, [(0, 49)])
         self.assertEqual(len(self.requests.calls), 2)
         self.assertIn('limit=0', self.requests.calls[0][0])
-        self.assertIn('&pid=49&tags=1girl', self.requests.calls[1][0])
+        self.assertIn('&pid=49&tags=1girl+sort:score', self.requests.calls[1][0])
         self.assertEqual(self.ns['COUNT'], 380_000)
         self.assertEqual(len(data['post']), 1)
 
     def test_pages_capped_by_result_count_and_dapi_limit(self):
         self.requests.responses = [count_xml(250), Response(data=[dapi_post()], text='[..]')]
-        self.quiet(self.ns['Safebooru']().get_data, '', 50)
+        self.quiet(self.ns['Safebooru']().get_data, '&tags=sort:id', 50)
         self.requests.responses = [Response(text=''), Response(data=[dapi_post()], text='[..]')]
-        self.quiet(self.ns['Safebooru']().get_data, '', 5000)
+        self.quiet(self.ns['Safebooru']().get_data, '&tags=sort:id', 5000)
         self.assertEqual(self.ranges, [(0, 2), (0, 2000)])
 
     def test_zero_count_skips_the_post_request(self):
@@ -198,9 +199,39 @@ class GelbooruBetaTests(AdapterTestBase):
         self.assertEqual(len(self.requests.calls), 1)
 
     def test_empty_body_page_is_empty_list(self):
-        self.requests.responses = [Response(text='nope'), Response(text='')]
+        # Random draw empty, then the random page empty too.
+        self.requests.responses = [Response(text='nope'), Response(text=''), Response(text='')]
         data, _ = self.quiet(self.ns['Safebooru']().get_data, '', 3)
         self.assertEqual(data, {'post': []})
+        self.assertEqual(len(self.requests.calls), 3)
+
+    def test_random_draw_from_the_whole_search(self):
+        for cls in ('Safebooru', 'XBooru', 'Rule34'):
+            self.requests.calls.clear()
+            self.requests.responses = [count_xml(380_000),
+                                       Response(data=[dapi_post(7)], text='[..]')]
+            data, out = self.quiet(self.ns[cls]().get_data, '&tags=-animated+1girl', 50)
+            self.assertEqual([p['id'] for p in data['post']], [7])
+            url, kwargs = self.requests.calls[1]
+            self.assertIn('&pid=0&tags=-animated+1girl+sort:random', url)
+            self.assertIs(kwargs['cache'], False)
+            self.assertNotIn('sort:random', self.requests.calls[0][0])  # the count
+            self.assertIn('sort:random: 1 posts (ids 7', out)
+            self.assertEqual(self.ns['COUNT'], 380_000)
+        self.assertEqual(self.ranges, [])
+
+    def test_random_draw_empty_or_refused_walks_pages(self):
+        refused = Response(text='<?xml version="1.0"?><response success="false" reason="bad tag"/>')
+        for reply in (Response(text='[]', data=[]), refused):
+            self.ranges.clear()
+            self.requests.calls.clear()
+            self.requests.responses = [count_xml(250), reply,
+                                       Response(data=[dapi_post(3)], text='[..]')]
+            data, out = self.quiet(self.ns['XBooru']().get_data, '&tags=1girl', 50)
+            self.assertEqual([p['id'] for p in data['post']], [3])
+            self.assertEqual(self.ranges, [(0, 2)])
+            self.assertIn('picking a random page instead', out)
+            self.assertIn('&pid=2&tags=1girl', self.requests.calls[2][0])
 
     def test_posts_are_normalised(self):
         posts = [
@@ -222,9 +253,9 @@ class GelbooruBetaTests(AdapterTestBase):
                           file_url='https://safebooru.org/images//')]
         self.requests.responses = [count_xml(2), Response(data=rows, text='[..]'),
                                    count_xml(2), Response(data=None, text='null')]
-        data, _ = self.quiet(self.ns['Rule34'](username='1', api_key='k').get_data, '', 1)
+        data, _ = self.quiet(self.ns['Rule34'](username='1', api_key='k').get_data, '&tags=sort:id', 1)
         self.assertEqual([p['id'] for p in data['post']], [5])
-        data, _ = self.quiet(self.ns['Rule34'](username='1', api_key='k').get_data, '', 1)
+        data, _ = self.quiet(self.ns['Rule34'](username='1', api_key='k').get_data, '&tags=sort:id', 1)
         self.assertEqual(data, {'post': []})
 
     def test_post_id(self):
@@ -268,17 +299,25 @@ class Rule34Tests(AdapterTestBase):
 
 class MoebooruTests(AdapterTestBase):
     def test_pages_are_one_based_and_capped_by_count(self):
-        for cls in ('Konachan', 'Yandere'):
-            self.requests.responses = [count_xml(250), Response(data=[moe_post()], text='[..]')]
-            data, _ = self.quiet(self.ns[cls]().get_data, '&tags=thighhighs', 50)
-            self.assertEqual(len(data['post']), 1)
-        self.assertEqual(self.ranges, [(1, 3), (1, 3)])
-        self.assertIn('post.xml?limit=1&tags=thighhighs', self.requests.calls[0][0])
-        self.assertIn('&page=3&tags=thighhighs', self.requests.calls[1][0])
+        self.requests.responses = [count_xml(250), Response(data=[moe_post()], text='[..]')]
+        data, _ = self.quiet(self.ns['Konachan']().get_data, '&tags=thighhighs+order:score', 50)
+        self.assertEqual(len(data['post']), 1)
+        self.assertEqual(self.ranges, [(1, 3)])
+        self.assertIn('post.xml?limit=1&tags=thighhighs+order:score', self.requests.calls[0][0])
+        self.assertIn('&page=3&tags=thighhighs+order:score', self.requests.calls[1][0])
+
+    def test_random_draw_from_the_whole_search(self):
+        self.requests.responses = [count_xml(250), Response(data=[moe_post(4)], text='[..]')]
+        data, _ = self.quiet(self.ns['Konachan']().get_data, '&tags=-animated+long_hair', 50)
+        self.assertEqual([p['id'] for p in data['post']], [4])
+        url, kwargs = self.requests.calls[1]
+        self.assertIn('&page=1&tags=-animated+long_hair+order:random', url)
+        self.assertIs(kwargs['cache'], False)
+        self.assertEqual(self.ranges, [])
 
     def test_skips_posts_without_image(self):
         self.requests.responses = [count_xml(3), Response(data=[moe_post(1), moe_post(2, None)], text='[..]')]
-        data, _ = self.quiet(self.ns['Yandere']().get_data, '', 1)
+        data, _ = self.quiet(self.ns['Konachan']().get_data, '', 1)
         self.assertEqual([p['id'] for p in data['post']], [1])
 
     def test_post_id(self):
@@ -289,12 +328,11 @@ class MoebooruTests(AdapterTestBase):
 
     def test_post_id_not_found(self):
         self.requests.responses = [Response(data=[], text='[]')]
-        with self.assertRaisesRegex(ValueError, 'yande.re post 999 was not found'):
-            self.quiet(self.ns['Yandere']().get_post, '', 10, '999')
+        with self.assertRaisesRegex(ValueError, 'konachan post 999 was not found'):
+            self.quiet(self.ns['Konachan']().get_post, '', 10, '999')
 
     def test_check_exception_allows_moebooru_post_ids(self):
-        for booru in ('konachan', 'yande.re'):
-            self.ns['check_exception'](booru, {'post_id': '1000', 'tags': ''})
+        self.ns['check_exception']('konachan', {'post_id': '1000', 'tags': ''})
 
 
 class AIBooruTests(AdapterTestBase):
@@ -303,11 +341,23 @@ class AIBooruTests(AdapterTestBase):
                  {'id': 2, 'tag_string': 'hidden'}]
         self.requests.responses = [Response(data={'counts': {'posts': 10 ** 7}}, text='{..}'),
                                    Response(data=posts, text='[..]')]
-        data, _ = self.quiet(self.ns['AIBooru']().get_data, '&tags=1girl', 5000)
+        data, _ = self.quiet(self.ns['AIBooru']().get_data, '&tags=1girl+order:score', 5000)
         self.assertEqual(self.ranges, [(1, 1000)])
         self.assertEqual(data['post'], [{'id': 1, 'tag_string': '1girl solo', 'score': 0,
                                          'file_url': 'https://cdn/a.png', 'tags': '1girl solo'}])
         self.assertIn('counts/posts.json?tags=1girl', self.requests.calls[0][0])
+
+    def test_random_draw_from_the_whole_search(self):
+        posts = [{'id': 9, 'tag_string': '1girl', 'file_url': 'https://cdn/a.png'}]
+        self.requests.responses = [Response(data={'counts': {'posts': 500}}, text='{..}'),
+                                   Response(data=posts, text='[..]')]
+        data, _ = self.quiet(self.ns['AIBooru']().get_data, '&tags=-animated+1girl', 50)
+        self.assertEqual([p['id'] for p in data['post']], [9])
+        url, kwargs = self.requests.calls[1]
+        self.assertIn('&page=1&tags=-animated+1girl+order:random', url)
+        self.assertIs(kwargs['cache'], False)
+        self.assertNotIn('order:random', self.requests.calls[0][0])
+        self.assertEqual(self.ns['COUNT'], 500)
 
     def test_post_id(self):
         post = {'id': 186442, 'tag_string': '1girl solo', 'score': 3,
@@ -330,7 +380,44 @@ class AIBooruTests(AdapterTestBase):
     def test_error_page_is_readable(self):
         self.requests.responses = [ConnectionError('down'), Response(status=500, text='<html>oops</html>')]
         with self.assertRaisesRegex(RuntimeError, 'AIBooru API error \\(HTTP 500\\)'):
-            self.quiet(self.ns['AIBooru']().get_data, '', 3)
+            self.quiet(self.ns['AIBooru']().get_data, '&tags=order:score', 3)
+
+
+class DanbooruTests(AdapterTestBase):
+    def post(self, post_id):
+        return {'id': post_id, 'tag_string': '1girl solo', 'file_url': 'https://cdn/a.png'}
+
+    def test_random_draw_when_a_tag_slot_is_free(self):
+        for tags in ('&tags=1girl', '&tags=1girl+rating%3Ag', '&tags='):
+            self.requests.calls.clear()
+            self.requests.responses = [Response(data=[self.post(5)], text='[..]')]
+            data, out = self.quiet(self.ns['Danbooru']().get_data, tags, 50)
+            self.assertEqual([p['id'] for p in data['post']], [5])
+            url, kwargs = self.requests.calls[0]
+            self.assertIn('&page=1', url)
+            self.assertTrue(url.endswith('random:100'), url)
+            self.assertIs(kwargs['cache'], False)
+            self.assertIn('random:100: 1 posts', out)
+        self.assertEqual(self.ranges, [])
+
+    def test_two_tags_or_own_order_walk_pages(self):
+        for tags in ('&tags=1girl+solo', '&tags=1girl+order%3Ascore'):
+            self.ranges.clear()
+            self.requests.calls.clear()
+            self.requests.responses = [Response(data=[self.post(6)], text='[..]')]
+            self.quiet(self.ns['Danbooru']().get_data, tags, 1)
+            self.assertNotIn('random:', self.requests.calls[0][0])
+            self.assertEqual(self.ranges, [(1, 1)])
+
+    def test_tag_limit_refusal_walks_pages(self):
+        limit = Response(status=422, data={'success': False, 'error': 'PostQuery::TagLimitError',
+                                           'message': 'You cannot search for more than 2 tags at a time.'},
+                         text='{..}')
+        self.requests.responses = [limit, Response(data=[self.post(7)], text='[..]')]
+        data, out = self.quiet(self.ns['Danbooru']().get_data, '&tags=1girl', 1)
+        self.assertEqual([p['id'] for p in data['post']], [7])
+        self.assertIn('picking a random page instead', out)
+        self.assertNotIn('random:', self.requests.calls[1][0])
 
 
 class CredentialManagerStub:
