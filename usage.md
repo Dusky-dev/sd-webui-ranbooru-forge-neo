@@ -47,13 +47,16 @@ By enabling `Chaos Mode` each image will have an amount of tags moved to the neg
 By enabling `Negative Mode` each image will have all tags moved to the negative prompt.
 ### Only Poses
 Enable `Only poses` to keep the composition of the random posts (pose, action, expression, camera angle, subject count like `1girl`) while removing the tags that describe *who* is in the picture:
-- **Appearance:** hair colour, length and style (`long_hair`, `twintails`, `blunt_bangs`), eye colour (`blue_eyes`), skin, body type (`large_breasts`), animal ears, tails, horns and wings.
+- **Appearance:** hair colour, length and style (`long_hair`, `twintails`, `blunt_bangs`), eyes (`blue_eyes`, `slit_pupils`), skin, body type (`large_breasts`, `muscular`), animal ears, tails, horns, wings and halos, moles, scars and freckles.
 - **Character, copyright and artist names:** removed using the booru's own tag categories on **Danbooru, AIBooru and e621** (e621 species tags are removed too). Other boorus don't report tag categories in their post data, so there only `*_(artist)` and `*_(cosplay)` tags are caught. Add any names that get through to **Tags to remove (post)** or a remove file.
 
-Pose and expression tags are kept even when they mention a body part: `closed_eyes`, `covering_eyes`, `hand_in_own_hair` and `holding_own_tail` are not removed.
+`Strip clothing & accessories` is a separate toggle (off by default). It works with or without `Only poses` and removes outfits, legwear, footwear, headwear, hair ornaments, jewelry, glasses and makeup (`white_shirt`, `pleated_skirt`, `school_uniform`, `hair_ribbon`).
 
-`Strip clothing & accessories` is a separate toggle. It works with or without `Only poses` and removes outfits, legwear, footwear, headwear, hair ornaments, jewelry and glasses (`white_shirt`, `pleated_skirt`, `school_uniform`, `hair_ribbon`). Clothing-based actions such as `skirt_lift` or `hand_in_pocket` are kept.
+Tags from Danbooru's posture, gestures, hands, sexual positions, face (expressions), image composition, focus and character count [tag groups](https://danbooru.donmai.us/wiki_pages/tag_groups) are never removed, so `closed_eyes`, `looking_back`, `hand_in_own_hair` and `skirt_lift` stay.
 
-Both options also apply to tags added by Deepbooru. The tag lists are best-effort: anything they miss can be removed with **Tags to remove (post)**.
+Both options also apply to tags added by Deepbooru. The lists use Danbooru's tag names, which Gelbooru, Safebooru and most other boorus share; e621 uses its own vocabulary, so expect more misses there. Anything that gets through can be removed with **Tags to remove (post)**.
+
+The lists live in `pose_tag_groups.json`. To refresh them from Danbooru's wiki, run `python tools/build_pose_tag_groups.py`.
+
 ### LoRAnado
 By enabling `Use LoRAnado` you can add random LoRAs to the prompt. This can lead to interesting results. Once you have enabled the option you have to choose a folder from your LoRA path, this can be your main folder or any subfolder (right now only the LoRAs contained in the set folder will be used, not the ones in other subfolders). You now need to set the min and max weight values you want to generate and the amount of random LoRAs to use. You can also set custom weights for each LoRA by separating them with a comma (e.g. 0.2,0.3,0.5). If you want to use the same LoRAs of the previous generation, enable `Lock Previous LoRAs`.

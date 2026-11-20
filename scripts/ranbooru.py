@@ -403,119 +403,60 @@ BW_BG = [
 ]
 
 # --- Only Poses mode ---------------------------------------------------------
-# Characteristic tags are matched structurally: a known noun (hair, eyes, skirt)
-# preceded ONLY by known modifier words (colours, lengths, styles). Substring
-# wildcards are deliberately avoided: '*_eyes' would also delete pose tags such
-# as closed_eyes or covering_eyes, which this mode must keep.
+# The main lists come from Danbooru's tag group wiki pages, pre-generated into
+# pose_tag_groups.json by tools/build_pose_tag_groups.py (never fetched at
+# runtime). Tags in the 'keep' set (posture, gestures, expressions, framing,
+# character count) are never stripped. Colour/creature combinations the wiki
+# does not list one by one (white_shirt, cat_tail) are matched structurally:
+# a known noun preceded only by known modifier words. Substring wildcards are
+# avoided: '*_eyes' would also remove closed_eyes, which this mode must keep.
 POSE_COLOR_WORDS = frozenset((
     'aqua', 'black', 'blonde', 'blue', 'brown', 'green', 'grey', 'gray',
     'orange', 'pink', 'purple', 'red', 'silver', 'white', 'yellow', 'gold',
     'golden', 'beige', 'teal', 'cyan', 'magenta', 'violet', 'lavender',
     'light', 'dark', 'pale', 'platinum', 'strawberry', 'ash', 'rainbow',
     'multicolored', 'two-tone', 'gradient', 'streaked', 'split-color',
-    'colored', 'tan', 'tanned', 'olive', 'maroon', 'navy', 'crimson',
+    'colored', 'tan', 'olive', 'maroon', 'navy', 'crimson',
 ))
 
-POSE_TRAIT_MODIFIERS = POSE_COLOR_WORDS | frozenset((
-    # hair length and style
-    'long', 'short', 'medium', 'very', 'absurdly', 'shoulder-length',
-    'wavy', 'curly', 'straight', 'messy', 'spiked', 'spiky', 'drill',
-    'fluffy', 'thick', 'big', 'huge', 'low', 'high', 'side', 'twin',
-    'single', 'double', 'french', 'crown', 'multiple', 'tied', 'braided',
-    'blunt', 'swept', 'parted', 'asymmetrical', 'inner', 'hair', 'pointy',
-    'sidecut', 'undercut', 'bowl', 'hime', 'bob', 'pixie', 'symbol-shaped',
-    'heart-shaped', 'star-shaped', 'slit', 'glowing', 'sparkling',
-    # body size
-    'small', 'large', 'gigantic', 'flat', 'wide', 'muscular', 'toned',
-    # animal / fantasy parts (ears, tails, wings, horns)
+# Fallback for appearance: colour + one of these nouns (red_eyes, blue_skin).
+POSE_COLOR_TRAIT_NOUNS = frozenset((
+    'hair', 'eyes', 'skin', 'pupils', 'sclera', 'eyelashes', 'eyebrows',
+))
+
+POSE_CREATURE_WORDS = frozenset((
     'animal', 'cat', 'dog', 'fox', 'wolf', 'rabbit', 'bunny', 'mouse',
     'horse', 'cow', 'sheep', 'goat', 'tiger', 'lion', 'bear', 'raccoon',
     'squirrel', 'monkey', 'pig', 'deer', 'dragon', 'demon', 'devil',
     'angel', 'bat', 'bird', 'feathered', 'fairy', 'insect', 'butterfly',
-    'fish', 'shark', 'snake', 'lizard', 'elf', 'oni', 'kitsune',
-    'curled', 'mechanical', 'fake', 'extra', 'fur',
-    'dark-skinned', 'light-skinned',
+    'fish', 'shark', 'snake', 'lizard', 'oni', 'kitsune', 'monster',
+    'mechanical', 'fake', 'extra', 'multiple', 'small', 'large', 'curled',
+    'single',
 ))
 
-# Nouns that are characteristics only with a modifier: 'long_hair' goes,
-# while 'hair', 'eyes' or 'breasts' alone stay.
-POSE_TRAIT_NOUNS = frozenset((
-    'hair', 'eyes', 'skin', 'eyebrows', 'eyelashes', 'pupils', 'sclera',
-    'irises', 'ears', 'tail', 'tails', 'wings', 'horns', 'horn', 'bangs',
-    'ponytail', 'twintails', 'braid', 'braids', 'bun', 'buns', 'hair_bun',
-    'sidelocks', 'drills', 'ringlets', 'cut', 'breasts', 'thighs', 'hips',
-    'female', 'male', 'girl', 'boy', 'lips',
-))
-
-# Tags removed outright.
-POSE_TRAIT_TAGS = frozenset((
-    'tail', 'animal_ears', 'animal_ear_fluff', 'ahoge', 'antenna_hair',
-    'twintails', 'ponytail', 'braid', 'twin_braids', 'sidelocks', 'bangs',
-    'hair_intakes', 'hair_flaps', 'hair_between_eyes', 'hair_over_one_eye',
-    'hair_over_eyes', 'hair_over_shoulder', 'hair_behind_ear', 'hair_bun',
-    'drill_hair', 'ringlets', 'hime_cut', 'bob_cut', 'pixie_cut', 'bald',
-    'heterochromia', 'freckles', 'mole', 'mole_under_eye', 'mole_under_mouth',
-    'mole_on_breast', 'beauty_mark', 'facial_mark', 'whisker_markings',
-    'scar', 'scar_on_face', 'scar_across_eye', 'facial_hair', 'beard',
-    'mustache', 'stubble', 'fang', 'fangs', 'skin_fang', 'sharp_teeth',
-    'flat_chest', 'abs', 'muscular', 'petite', 'curvy', 'plump', 'toned',
-    'thick_thighs', 'wide_hips', 'horns', 'single_horn', 'wings', 'halo',
-    'pointy_ears', 'elf', 'tan', 'tanlines', 'dark_skin', 'pale_skin',
-    'colored_skin', 'eyelashes', 'eyebrows_visible_through_hair',
-    'eyes_visible_through_hair', 'hair_ears', 'kemonomimi_mode',
+# Fallback for creature parts: creature/colour + noun (cat_tail, black_horns).
+POSE_CREATURE_TRAIT_NOUNS = frozenset((
+    'ears', 'tail', 'tails', 'horns', 'horn', 'wings', 'halo', 'girl', 'boy',
 ))
 
 POSE_CLOTHING_MODIFIERS = POSE_COLOR_WORDS | frozenset((
     'long', 'short', 'mini', 'micro', 'pencil', 'pleated', 'frilled',
-    'striped', 'plaid', 'checkered', 'polka', 'dot', 'print', 'floral',
-    'lace', 'leather', 'latex', 'denim', 'fur', 'see-through', 'sheer',
-    'sleeveless', 'strapless', 'backless', 'halterneck', 'off-shoulder',
-    'detached', 'wide', 'puffy', 'juliet', 'open',
-    'unbuttoned', 'torn', 'cropped', 'high-waist', 'side-tie', 'string',
-    'competition', 'one-piece', 'school', 'sailor', 'maid', 'gothic',
-    'lolita', 'military', 'santa', 'witch', 'baseball', 'peaked', 'top',
-    'sun', 'straw', 'cowboy', 'hair', 'thigh', 'knee', 'ankle', 'elbow',
-    'fingerless', 'bridal', 'wedding', 'evening', 'china', 'chinese',
-    'japanese', 'single', 'mismatched', 'hooded', 'cross', 'neck', 'mob', 'beret', 'wrist', 'ear', 'x', 'flower', 'star',
-    'heart', 'gym', 'sports', 'race', 'naval', 'nurse', 'police', 'tank',
-    'crop', 'tube', 'turtleneck', 'sweater', 'bow', 'ribbon', 'animal',
-    'cat', 'rabbit', 'bunny', 'fake', 'round', 'rimless', 'semi-rimless',
-    'red-framed', 'black-framed', 'high', 'low', 'thick', 'arm', 'leg',
-    'garter', 'tight', 'loose', 'oversized', 'collared', 'sleeved',
-    'double-breasted', 'buttoned', 'zipped', 'shiny', 'wet', 'transparent',
-))
-
-POSE_CLOTHING_NOUNS = frozenset((
-    'shirt', 't-shirt', 'blouse', 'skirt', 'miniskirt', 'dress', 'sundress',
-    'jacket', 'coat', 'vest', 'hoodie', 'sweater', 'cardigan', 'blazer',
-    'shorts', 'pants', 'jeans', 'leggings', 'thighhighs', 'kneehighs',
-    'pantyhose', 'legwear', 'socks', 'stockings', 'shoes', 'boots',
-    'sandals', 'sneakers', 'loafers', 'high_heels', 'footwear', 'gloves',
-    'elbow_gloves', 'mittens', 'hat', 'cap', 'beret', 'headwear', 'hood',
-    'headband', 'hairband', 'headdress', 'headpiece', 'tiara', 'crown',
-    'veil', 'helmet', 'hair_ornament', 'hair_ribbon', 'hair_bow',
-    'hair_flower', 'hairclip', 'hairpin', 'scrunchie', 'ribbon', 'bow',
-    'bowtie', 'necktie', 'tie', 'ascot', 'neckerchief', 'scarf', 'collar',
-    'sailor_collar', 'choker', 'necklace', 'pendant', 'earrings',
-    'bracelet', 'jewelry', 'ring', 'brooch', 'belt', 'sash', 'obi',
-    'apron', 'uniform', 'serafuku', 'kimono', 'yukata', 'hakama',
-    'cheongsam', 'leotard', 'bodysuit', 'swimsuit', 'bikini', 'underwear',
-    'panties', 'bra', 'lingerie', 'garter_straps', 'garter_belt',
-    'fishnets', 'armor', 'cape', 'capelet', 'cloak', 'robe', 'sleeves',
-    'glasses', 'eyewear', 'sunglasses', 'goggles', 'eyepatch', 'mask',
-    'headphones', 'earmuffs', 'wristband', 'wrist_cuffs', 'armband',
-    'tank_top', 'crop_top', 'tube_top', 'overalls', 'bloomers', 'buruma',
-    'clothes', 'clothing', 'outfit', 'costume', 'nail_polish', 'frills',
-    'buttons', 'shirt_collar', 'turtleneck', 'zettai_ryouiki', 'pasties',
-))
-
-POSE_CLOTHING_TAGS = frozenset((
-    'school_uniform', 'maid', 'serafuku', 'zettai_ryouiki', 'gakuran',
-    'playboy_bunny', 'detached_collar', 'long_sleeves', 'short_sleeves',
-    'sleeveless', 'wide_sleeves', 'puffy_sleeves', 'detached_sleeves',
-    'sleeves_past_wrists', 'sleeves_past_fingers', 'bare_shoulders',
-    'off_shoulder', 'cleavage_cutout', 'clothing_cutout', 'jewelry',
-    'maid_headdress', 'maid_apron', 'frilled_apron',
+    'striped', 'vertical-striped', 'plaid', 'checkered', 'polka', 'dot',
+    'print', 'floral', 'lace', 'leather', 'latex', 'denim', 'fur',
+    'see-through', 'sheer', 'sleeveless', 'strapless', 'backless',
+    'halterneck', 'off-shoulder', 'detached', 'wide', 'puffy', 'juliet',
+    'open', 'unbuttoned', 'torn', 'cropped', 'high-waist', 'side-tie',
+    'string', 'competition', 'one-piece', 'school', 'sailor', 'maid',
+    'gothic', 'military', 'santa', 'witch', 'baseball', 'peaked', 'top',
+    'straw', 'cowboy', 'hair', 'thigh', 'knee', 'ankle', 'elbow',
+    'fingerless', 'bridal', 'wedding', 'china', 'chinese', 'japanese',
+    'single', 'mismatched', 'hooded', 'neck', 'mob', 'wrist', 'x', 'star',
+    'heart', 'gym', 'sports', 'naval', 'nurse', 'police', 'track',
+    'turtleneck', 'sweater', 'bow', 'ribbon', 'animal', 'rabbit', 'fake',
+    'round', 'high', 'low', 'thick', 'arm', 'leg', 'garter', 'tight',
+    'loose', 'oversized', 'collared', 'buttoned', 'shiny', 'wet',
+    'transparent', 'frilled', 'winter', 'summer', 'asymmetrical', 'waist',
+    'highleg', 'front-tie', 'multiple',
 ))
 
 # Generic fallbacks for boorus whose posts carry no tag categories.
@@ -526,6 +467,34 @@ POSE_CATEGORY_FIELDS = (
     'tag_string_artist', 'tag_string_character', 'tag_string_copyright'
 )
 
+POSE_EMPTY_GROUPS = {
+    'traits': frozenset(), 'clothing': frozenset(), 'keep': frozenset(),
+    'clothing_nouns': frozenset(),
+}
+
+
+def load_pose_tag_groups(path):
+    """Read the generated tag lists; an unreadable file leaves only the fallback rules."""
+    try:
+        with open(path, 'r', encoding='utf-8') as groups_file:
+            data = json.load(groups_file)
+        groups = {
+            name: frozenset(
+                tag for tag in data.get(name, []) if isinstance(tag, str)
+            )
+            for name in ('traits', 'clothing', 'keep')
+        }
+    except (OSError, ValueError, AttributeError, TypeError) as exc:
+        print(f'[Ranbooru] Only Poses tag lists unavailable ({exc}); '
+              'using built-in rules only.')
+        return dict(POSE_EMPTY_GROUPS)
+    # Single-word clothing tags (shirt, skirt) become nouns for white_shirt etc.
+    groups['clothing_nouns'] = frozenset(
+        tag for tag in groups['clothing'] if '_' not in tag
+    ) | {'hair_ornament', 'hair_ribbon', 'hair_bow', 'hair_flower',
+         'sailor_collar', 'high_heels', 'tank_top', 'crop_top', 'nails'}
+    return groups
+
 
 def _normalize_pose_tag(tag):
     """Compare tags in booru form: lower case, underscores, unescaped parens."""
@@ -533,55 +502,61 @@ def _normalize_pose_tag(tag):
     return '_'.join(tag.split())
 
 
-def _matches_structure(words, nouns, modifiers, require_modifier):
-    """True when the tag ends with a noun and every word before it is a modifier."""
-    for size in (3, 2, 1):
-        if len(words) < size:
+def _matches_structure(words, nouns, modifiers):
+    """True when the tag is a noun preceded only by (at least one) modifier."""
+    for size in (2, 1):
+        if len(words) <= size:
             continue
-        if '_'.join(words[-size:]) not in nouns:
-            continue
-        prefix = words[:-size]
-        if require_modifier and not prefix:
-            continue
-        if all(
-            word in modifiers or word.endswith(('-trimmed', '-colored', '-shaped', '-print', '-framed', '-skinned'))
-            for word in prefix
+        if '_'.join(words[-size:]) in nouns and all(
+            word in modifiers for word in words[:-size]
         ):
             return True
     return False
 
 
-def is_characteristic_tag(tag, strip_traits=True, strip_clothing=False, excluded=()):
-    """Whether Only Poses mode should strip this tag from a booru prompt."""
+def is_characteristic_tag(tag, strip_traits=True, strip_clothing=False,
+                          excluded=(), groups=None):
+    """Whether Only Poses / clothing stripping should remove this tag."""
+    if groups is None:
+        groups = pose_tag_groups
     norm = _normalize_pose_tag(tag)
     if not norm:
+        return False
+
+    # The booru itself says this is an artist/character/copyright tag.
+    if strip_traits and (norm in excluded or norm.endswith(POSE_QUALIFIER_SUFFIXES)):
+        return True
+    if norm in groups['keep']:
         return False
     words = norm.split('_')
 
     if strip_traits:
-        if norm in excluded or norm.endswith(POSE_QUALIFIER_SUFFIXES):
+        if norm in groups['traits']:
             return True
-        if norm in POSE_TRAIT_TAGS:
+        if _matches_structure(words, POSE_COLOR_TRAIT_NOUNS, POSE_COLOR_WORDS):
             return True
-        if _matches_structure(words, POSE_TRAIT_NOUNS, POSE_TRAIT_MODIFIERS, True):
+        if _matches_structure(words, POSE_CREATURE_TRAIT_NOUNS,
+                              POSE_CREATURE_WORDS | POSE_COLOR_WORDS):
             return True
 
     if strip_clothing:
-        if norm in POSE_CLOTHING_TAGS:
+        if norm in groups['clothing']:
             return True
-        if _matches_structure(words, POSE_CLOTHING_NOUNS, POSE_CLOTHING_MODIFIERS, False):
+        if _matches_structure(words, groups['clothing_nouns'], POSE_CLOTHING_MODIFIERS):
             return True
 
     return False
 
 
-def filter_pose_tags(tags, strip_traits=True, strip_clothing=False, excluded=()):
+def filter_pose_tags(tags, strip_traits=True, strip_clothing=False,
+                     excluded=(), groups=None):
     """Return the tags (in order) that survive Only Poses / clothing stripping."""
     if not strip_traits and not strip_clothing:
         return list(tags)
     return [
         tag for tag in tags
-        if not is_characteristic_tag(tag, strip_traits, strip_clothing, excluded)
+        if not is_characteristic_tag(tag, strip_traits, strip_clothing,
+                                     excluded, groups)
     ]
 
 
@@ -598,6 +573,11 @@ def post_category_tags(post):
             if isinstance(values, list):
                 found.extend(v for v in values if isinstance(v, str))
     return {_normalize_pose_tag(tag) for tag in found if tag.strip()}
+
+
+pose_tag_groups = load_pose_tag_groups(
+    os.path.join(extension_root, 'pose_tag_groups.json')
+)
 
 
 POST_AMOUNT = 100

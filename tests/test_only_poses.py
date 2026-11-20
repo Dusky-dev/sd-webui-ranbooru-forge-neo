@@ -1,13 +1,15 @@
 """Forge-independent tests of the Only Poses / clothing tag filter."""
 import ast
+import json
 from pathlib import Path
 import unittest
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / 'scripts' / 'ranbooru.py'
 FUNCTIONS = {
     '_normalize_pose_tag', '_matches_structure', 'is_characteristic_tag',
-    'filter_pose_tags', 'post_category_tags',
+    'filter_pose_tags', 'post_category_tags', 'load_pose_tag_groups',
 }
+GROUPS_PATH = MODULE_PATH.parents[1] / 'pose_tag_groups.json'
 
 
 def load_pose_filter():
@@ -23,9 +25,10 @@ def load_pose_filter():
     found = {n.name for n in nodes if isinstance(n, ast.FunctionDef)}
     if found != FUNCTIONS:
         raise AssertionError(f'Missing pose helpers: {FUNCTIONS - found}')
-    namespace = {}
+    namespace = {'json': json}
     module = ast.fix_missing_locations(ast.Module(body=nodes, type_ignores=[]))
     exec(compile(module, str(MODULE_PATH), 'exec'), namespace)
+    namespace['pose_tag_groups'] = namespace['load_pose_tag_groups'](str(GROUPS_PATH))
     return namespace
 
 
@@ -36,6 +39,8 @@ class TestOnlyPoses(unittest.TestCase):
         cls.is_char = staticmethod(ns['is_characteristic_tag'])
         cls.filter = staticmethod(ns['filter_pose_tags'])
         cls.categories = staticmethod(ns['post_category_tags'])
+        cls.load_groups = staticmethod(ns['load_pose_tag_groups'])
+        cls.groups = ns['pose_tag_groups']
 
     def test_strips_appearance_traits(self):
         for tag in (
@@ -44,6 +49,8 @@ class TestOnlyPoses(unittest.TestCase):
             'blunt_bangs', 'multicolored_hair', 'large_breasts', 'cat_ears',
             'fox_tail', 'tail', 'dark_skin', 'dark-skinned_female',
             'heterochromia', 'demon_horns', 'slit_pupils', 'grey_eyes',
+            'ponytail', 'braid', 'cat_tail', 'cat_girl', 'blue_halo', 'horns',
+            'wings', 'fang', 'tsurime', 'mole_under_eye', 'thick_thighs',
         ):
             self.assertTrue(self.is_char(tag), tag)
 
@@ -55,6 +62,8 @@ class TestOnlyPoses(unittest.TestCase):
             'sitting', 'smile', 'open_mouth', 'breasts', 'hair', 'eyes',
             'hand_on_hip', 'holding_own_tail', 'tail_wagging', 'from_side',
             'skirt_lift', 'hand_in_pocket', 'white_shirt', 'pleated_skirt',
+            'parted_lips', 'v-shaped_eyebrows', 'looking_back', 'crossed_arms',
+            'magical_girl', 'multiple_boys', 'hand_on_own_chest',
         ):
             self.assertFalse(self.is_char(tag), tag)
 
@@ -72,12 +81,32 @@ class TestOnlyPoses(unittest.TestCase):
     def test_clothing_is_a_separate_toggle(self):
         for tag in ('white_shirt', 'pleated_skirt', 'black_thighhighs',
                     'school_uniform', 'hair_ribbon', 'long_sleeves', 'glasses',
-                    'red_bowtie', 'frilled_dress', 'fur-trimmed_jacket'):
+                    'red_bowtie', 'frilled_dress', 'black_thighhighs',
+                    'blue_skirt', 'striped_thighhighs', 'jewelry', 'panties'):
             self.assertFalse(self.is_char(tag, strip_clothing=False), tag)
             self.assertTrue(self.is_char(tag, strip_traits=False, strip_clothing=True), tag)
         for tag in ('skirt_lift', 'hand_in_pocket', 'holding_hat',
-                    'shirt_lift', 'no_shirt', 'boxing_ring', 'sitting'):
+                    'shirt_lift', 'no_shirt', 'boxing_ring', 'sitting',
+                    'clothes_lift', 'hood_down', 'holding_umbrella', 'umbrella',
+                    'adjusting_eyewear', 'fingernails'):
             self.assertFalse(self.is_char(tag, strip_traits=False, strip_clothing=True), tag)
+
+    def test_keep_groups_are_never_stripped(self):
+        self.assertGreater(len(self.groups['keep']), 500)
+        for tag in self.groups['keep']:
+            self.assertFalse(self.is_char(tag, True, True), tag)
+
+    def test_generated_lists_loaded(self):
+        self.assertGreater(len(self.groups['traits']), 300)
+        self.assertGreater(len(self.groups['clothing']), 800)
+        self.assertFalse(self.groups['traits'] & self.groups['keep'])
+
+    def test_missing_lists_fall_back_to_rules(self):
+        empty = self.load_groups(str(GROUPS_PATH) + '.missing')
+        self.assertTrue(self.is_char('blue_eyes', groups=empty))
+        self.assertTrue(self.is_char('cat_tail', groups=empty))
+        self.assertFalse(self.is_char('closed_eyes', groups=empty))
+        self.assertFalse(self.is_char('white_shirt', True, True, groups=empty))
 
     def test_clothing_only_keeps_traits(self):
         self.assertFalse(self.is_char('long_hair', strip_traits=False, strip_clothing=True))
