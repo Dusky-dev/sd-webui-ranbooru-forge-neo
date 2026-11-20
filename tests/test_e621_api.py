@@ -106,8 +106,14 @@ class E621AdapterTests(unittest.TestCase):
         self.assertIs(kwargs['cache'], False)
         self.assertEqual(self.pages, [])
 
-    def test_random_draw_empty_walks_a_page(self):
-        self.requests.responses = [Response([]), Response([current_post(2)])]
+    def test_random_draw_empty_is_an_empty_search(self):
+        self.requests.responses = [Response([])]
+        self.assertEqual(self.adapter.get_data('&tags=solo', 3)['post'], [])
+        self.assertEqual(len(self.requests.calls), 1)
+
+    def test_random_draw_refused_walks_a_page(self):
+        self.requests.responses = [Response({'success': False, 'message': 'bad'}, status=422),
+                                   Response([current_post(2)])]
         posts = self.adapter.get_data('&tags=solo', 3)['post']
         self.assertEqual([p['id'] for p in posts], [2])
         self.assertEqual(self.pages, [(1, 3)])

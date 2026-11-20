@@ -116,6 +116,7 @@ def build_forge_modules(extension_root, calls):
             self.index_of_first_image = first
             self.all_seeds = p.all_seeds
             self.width, self.height, self.steps = p.width, p.height, p.steps
+            self.info = f'Steps: {p.steps}, Size: {p.width}x{p.height}'
 
     def process_images(p):
         try:
@@ -455,6 +456,7 @@ class ForgeHarnessTests(unittest.TestCase):
                 self.assertFalse(img2img[0].do_not_save_samples)
                 self.assertEqual((processed.width, processed.height, processed.steps),
                                  size + (20,))
+                self.assertEqual(processed.info, f'Steps: 20, Size: {size[0]}x{size[1]}')
                 # p is back to what the user set.
                 self.assertEqual((p.steps, p.width, p.height, p.enable_hr,
                                   p.do_not_save_samples, p.do_not_save_grid),
@@ -505,6 +507,34 @@ class ForgeHarnessTests(unittest.TestCase):
                 mock.patch('sys.stdout', new=io.StringIO()):
             script.before_process(p, *self.values(use_img2img=True, same_prompt=True))
         self.assertEqual(len(fetched), 1)
+
+    def test_failed_search_never_reuses_the_last_runs_images(self):
+        script = self.rb.Script()
+
+        def run(**overrides):
+            # Like Forge: an error in before_process is reported, then
+            # generation carries on and postprocess is called.
+            self.calls.clear()
+            p = self.processing(1, 1)
+            with mock.patch.object(self.rb.requests, 'get', side_effect=fake_get), \
+                    mock.patch('sys.stdout', new=io.StringIO()):
+                try:
+                    script.before_process(p, *self.values(**overrides))
+                except Exception:
+                    pass
+                processed = self.rb.process_images(p)
+                script.postprocess(p, processed, *self.values(**overrides))
+            return p
+
+        run(use_img2img=True)
+        self.assertEqual(len([c for c in self.calls if hasattr(c, 'init_images')]), 1)
+        FAILING_IMAGES.update(range(6))
+        try:
+            p = run(use_img2img=True)
+        finally:
+            FAILING_IMAGES.clear()
+        self.assertEqual([c for c in self.calls if hasattr(c, 'init_images')], [])
+        self.assertEqual(p.steps, 20)  # the full txt2img run, untouched
 
     def test_interrupt_stops_between_passes(self):
         state = self.rb.shared.state

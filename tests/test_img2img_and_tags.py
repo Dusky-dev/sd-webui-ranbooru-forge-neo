@@ -307,8 +307,19 @@ class ImagesForPostsTests(unittest.TestCase):
             calls.append(post)
             raise RuntimeError('404')
         with self.assertRaises(RuntimeError):
-            self.run_quiet([pool[0]], [0], pool, failing, max_swaps=3)
+            self.run_quiet([pool[0]], [0], pool, failing, max_swaps=3,
+                           max_failures_first=100)
         self.assertEqual(len(calls), 4)
+        # Host down: stop after the first few failures, for all images.
+        calls.clear()
+        with self.assertRaisesRegex(RuntimeError, 'none of the 4'):
+            self.run_quiet(pool[:4], [0, 1, 2, 3], pool, failing)
+        self.assertEqual(len(calls), 3)
+        # Once one image loaded, swaps continue as usual.
+        pool = [{'id': n} for n in range(10)]
+        posts = [pool[0], pool[1]]
+        self.run_quiet(posts, [0, 1], pool, self.load({1, 2, 3, 4, 5}))
+        self.assertEqual([p['id'] for p in posts], [0, 6])
 
 
 class RemovedFeaturesTests(unittest.TestCase):

@@ -886,30 +886,36 @@ def download_image(urls, headers, downloaded):
     raise RuntimeError(f'no image could be downloaded ({", ".join(errors) or "no URL"})')
 
 
-def images_for_posts(posts, needed, pool, load, fixed=False, max_swaps=10):
+def images_for_posts(posts, needed, pool, load, fixed=False, max_swaps=10,
+                     max_failures_first=3):
     """Load the image of posts[i] for each i in needed; returns {i: image}.
 
     A post whose image can't be loaded is replaced in posts (everywhere it
     appears, so Same prompt stays the same) by an unused post from pool, so
     its prompt follows the image. With no spare post left, a post that did
     load is reused, prompt and image together. fixed (a post ID): nothing
-    can replace the post, so fail with its ID.
+    can replace the post, so fail with its ID. If the first
+    max_failures_first tries all fail, the image host is likely down: stop
+    rather than wait on every spare post.
     """
     images = {}
     spare = [post for post in pool if all(post is not chosen for chosen in posts)]
     swaps = max_swaps
+    failures = 0
     for index in needed:
         while index not in images:
             post = posts[index]
             try:
                 images[index] = load(post)
             except Exception as exc:
+                failures += 1
                 if fixed:
                     raise RuntimeError(
                         f'[Ranbooru] Use img2img: the image of post '
                         f'{post.get("id")} could not be downloaded ({exc}).'
                     ) from exc
-                if not spare or swaps <= 0:
+                if not spare or swaps <= 0 or (
+                        not images and failures >= max_failures_first):
                     break
                 swaps -= 1
                 replacement = spare.pop(0)
@@ -918,6 +924,8 @@ def images_for_posts(posts, needed, pool, load, fixed=False, max_swaps=10):
                 for position, chosen in enumerate(posts):
                     if chosen is post:
                         posts[position] = replacement
+        if not images and failures >= max_failures_first:
+            break
 
     loaded = [index for index in needed if index in images]
     if not loaded:
@@ -1309,12 +1317,14 @@ def with_search_term(add_tags, term):
     return f'{add_tags}+{term}'
 
 
-def random_or_paged(site, term, fetch_random, fetch_paged):
+def random_or_paged(site, term, fetch_random, fetch_paged, page_when_empty=True):
     """Posts drawn at random from the whole search, else a random page.
 
     fetch_random() asks the booru to order the search randomly (one request,
     never cached: the URL is the same every time). If the booru refuses that
     or returns nothing, fall back to the old random-page walk.
+    page_when_empty=False: an empty draw means the search matches nothing
+    (for boorus that report no count to check that first).
     """
     try:
         posts = fetch_random()
@@ -1331,6 +1341,9 @@ def random_or_paged(site, term, fetch_random, fetch_paged):
     if posts:
         sample = ', '.join(str(post.get('id')) for post in posts[:5])
         print(f'[Ranbooru] {site} {term}: {len(posts)} posts (ids {sample}...)')
+        return posts
+    if not page_when_empty:
+        print(f'[Ranbooru] {site} {term} returned no posts.')
         return posts
     print(f'[Ranbooru] {site} {term} returned no posts; '
           'picking a random page instead.')
@@ -2090,8 +2103,10 @@ class Danbooru(Booru):
                     ) from exc
                 return self._normalize_posts(self._read_api_json(response, list))
 
-            posts = random_or_paged('Danbooru', term, random_posts, lambda: [])
-            if posts:
+            # None: the draw was refused, so walk pages below.
+            posts = random_or_paged('Danbooru', term, random_posts, lambda: None,
+                                    page_when_empty=False)
+            if posts is not None:
                 COUNT = len(posts)
                 return {'post': posts}
 
@@ -2316,7 +2331,8 @@ class e621(Booru):
         if id or has_own_order(add_tags):
             posts = paged_posts()
         else:
-            posts = random_or_paged('e621', 'order:random', random_posts, paged_posts)
+            posts = random_or_paged('e621', 'order:random', random_posts, paged_posts,
+                                    page_when_empty=False)
         COUNT = len(posts)
         return {'post': posts}
 
@@ -3092,6 +3108,13 @@ class Script(scripts.Script):
         clear_credentials_btn
     ):
 
+        # Forge reports an error raised here and carries on with generation,
+        # then calls postprocess. Clear the last run's images and settings
+        # first, so a failed search never reuses them.
+        self.last_img = None
+        self.real_settings = None
+        self.real_size = None
+
         # Snapshot the actual submitted values, not partially edited browser state.
         # Saving before API queries also preserves inputs when the query fails.
         if enabled:
@@ -3755,6 +3778,7 @@ class Script(scripts.Script):
             use_img2img
             and not use_ip
             and enabled
+            and self.last_img  # None when before_process failed
         ):
 
             print('Using pictures')
@@ -3804,7 +3828,7 @@ class Script(scripts.Script):
             base_settings = img2img_settings_from(
                 p, StableDiffusionProcessingImg2Img
             )
-            images, infotexts, first_image = [], [], 0
+            images, infotexts, first_image, info = [], [], 0, None
             for batch in range(n_iter):
                 state = getattr(shared, 'state', None)
                 if state is not None and (
@@ -3841,6 +3865,8 @@ class Script(scripts.Script):
                 proc = process_images(
                     StableDiffusionProcessingImg2Img(**settings)
                 )
+                if info is None:
+                    info = getattr(proc, 'info', None)
 
                 if n_iter == 1:
                     # One run: keep Forge's own grid, if it made one.
@@ -3858,6 +3884,9 @@ class Script(scripts.Script):
             processed.index_of_first_image = first_image
             processed.width, processed.height = width, height
             processed.steps = self.real_steps
+            if info is not None:
+                # Shown under the gallery; it described the throwaway pass.
+                processed.info = info
 
             # Show the source booru image(s) after the results, each with the
             # infotext of the image it produced.

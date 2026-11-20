@@ -409,6 +409,12 @@ class DanbooruTests(AdapterTestBase):
             self.assertNotIn('random:', self.requests.calls[0][0])
             self.assertEqual(self.ranges, [(1, 1)])
 
+    def test_empty_draw_is_an_empty_search(self):
+        self.requests.responses = [Response(data=[], text='[]')]
+        data, _ = self.quiet(self.ns['Danbooru']().get_data, '&tags=no_such_tag', 5)
+        self.assertEqual(data, {'post': []})
+        self.assertEqual(len(self.requests.calls), 1)
+
     def test_tag_limit_refusal_walks_pages(self):
         limit = Response(status=422, data={'success': False, 'error': 'PostQuery::TagLimitError',
                                            'message': 'You cannot search for more than 2 tags at a time.'},
