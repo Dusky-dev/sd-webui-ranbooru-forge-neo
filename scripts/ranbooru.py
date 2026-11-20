@@ -422,6 +422,7 @@ POSE_COLOR_WORDS = frozenset((
 # Fallback for appearance: colour + one of these nouns (red_eyes, blue_skin).
 POSE_COLOR_TRAIT_NOUNS = frozenset((
     'hair', 'eyes', 'skin', 'pupils', 'sclera', 'eyelashes', 'eyebrows',
+    'streaks',
 ))
 
 POSE_CREATURE_WORDS = frozenset((
@@ -431,7 +432,7 @@ POSE_CREATURE_WORDS = frozenset((
     'angel', 'bat', 'bird', 'feathered', 'fairy', 'insect', 'butterfly',
     'fish', 'shark', 'snake', 'lizard', 'oni', 'kitsune', 'monster',
     'mechanical', 'fake', 'extra', 'multiple', 'small', 'large', 'curled',
-    'single',
+    'single', 'eastern', 'western',
 ))
 
 # Fallback for creature parts: creature/colour + noun (cat_tail, black_horns).
@@ -2046,6 +2047,7 @@ class Script(scripts.Script):
 
             only_poses = gr.Checkbox(
                 label="Only poses (strip appearance, character, copyright & artist tags)",
+                info="Character/copyright/artist names are detected on Danbooru and AIBooru only",
                 value=saved_value('only_poses', False)
             )
 

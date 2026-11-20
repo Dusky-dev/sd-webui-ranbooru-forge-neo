@@ -103,16 +103,24 @@ EXTRA_TRAITS = {
     'scar_across_eye', 'facial_hair', 'beard', 'mustache', 'stubble',
     'facial_mark', 'whisker_markings', 'freckles', 'tattoo', 'furry',
     'furry_female', 'furry_male', 'kemonomimi_mode', 'monster_girl',
+    'short_eyebrows', 'colored_extremities',
 }
 EXTRA_CLOTHING = {
     'jewelry', 'underwear', 'panties', 'bra', 'lingerie', 'thong',
     'sleeveless', 'strapless', 'off_shoulder', 'highleg', 'headgear',
     'zettai_ryouiki', 'cleavage_cutout', 'clothing_cutout', 'fishnets',
     'nail_polish', 'makeup', 'lipstick', 'eyeshadow', 'skirt_set',
+    'jersey', 'baseball_jersey', 'bead_bracelet', 'biker_clothes',
 }
 # Held props and body parts the attire pages happen to list.
 NOT_CLOTHING = {'umbrella', 'hand_fan', 'fingernails', 'long_fingernails',
-                'toenails'}
+                'toenails', 'book_on_head', 'bucket_on_head', 'food_on_head',
+                'object_on_head', 'traffic_cone_on_head'}
+
+
+def is_action(tag):
+    """Actions listed on appearance/attire pages (holding_compact, hair_in_own_mouth)."""
+    return tag.startswith(('holding_', 'adjusting_')) or '_in_own_' in tag
 
 LINK = re.compile(r'\[\[([^\]|]+)(?:\|[^\]]*)?\]\]')
 HEADING = re.compile(r'^h\d(?:#[\w-]+)?\.\s*(.+)$')
@@ -194,8 +202,8 @@ def main():
     data = {
         'source': 'https://danbooru.donmai.us/wiki_pages/tag_groups',
         'generated': time.strftime('%Y-%m-%d'),
-        'traits': sorted(traits - keep),
-        'clothing': sorted(clothing - keep - traits),
+        'traits': sorted(t for t in traits - keep if not is_action(t)),
+        'clothing': sorted(t for t in clothing - keep - traits if not is_action(t)),
         'keep': sorted(keep),
     }
     OUTPUT.write_text(json.dumps(data, indent=1, ensure_ascii=False) + '\n',

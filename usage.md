@@ -48,7 +48,7 @@ By enabling `Negative Mode` each image will have all tags moved to the negative 
 ### Only Poses
 Enable `Only poses` to keep the composition of the random posts (pose, action, expression, camera angle, subject count like `1girl`) while removing the tags that describe *who* is in the picture:
 - **Appearance:** hair colour, length and style (`long_hair`, `twintails`, `blunt_bangs`), eyes (`blue_eyes`, `slit_pupils`), skin, body type (`large_breasts`, `muscular`), animal ears, tails, horns, wings and halos, moles, scars and freckles.
-- **Character, copyright and artist names:** removed using the booru's own tag categories on **Danbooru, AIBooru and e621** (e621 species tags are removed too). Other boorus don't report tag categories in their post data, so there only `*_(artist)` and `*_(cosplay)` tags are caught. Add any names that get through to **Tags to remove (post)** or a remove file.
+- **Character, copyright and artist names:** removed using the booru's own tag categories on **Danbooru and AIBooru**. The e621 adapter also strips artist, copyright, character and species tags when e621 reports tag categories, but e621's API currently returns flat tag lists, so this could not be verified. Other boorus don't report tag categories in their post data, so there only `*_(artist)` and `*_(cosplay)` tags are caught. Add any names that get through to **Tags to remove (post)** or a remove file.
 
 `Strip clothing & accessories` is a separate toggle (off by default). It works with or without `Only poses` and removes outfits, legwear, footwear, headwear, hair ornaments, jewelry, glasses and makeup (`white_shirt`, `pleated_skirt`, `school_uniform`, `hair_ribbon`).
 
