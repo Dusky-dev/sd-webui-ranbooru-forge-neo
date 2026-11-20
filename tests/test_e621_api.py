@@ -76,7 +76,7 @@ class E621AdapterTests(unittest.TestCase):
             self.pages.append((low, high))
             return high
 
-        self.ns = {'requests': self.requests, 'POST_AMOUNT': 100, 'COUNT': 0,
+        self.ns = {'requests': self.requests, 'booru_http': self.requests, 'POST_AMOUNT': 100, 'COUNT': 0,
                    'random': types.SimpleNamespace(randint=randint)}
         exec(self.module, self.ns)
         self.adapter = self.ns['e621']()

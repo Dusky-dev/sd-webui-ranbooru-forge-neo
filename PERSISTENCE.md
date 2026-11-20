@@ -13,7 +13,7 @@ Ranbooru remembers its UI settings from the last generation performed with it en
 ## Check persistence
 
 1. Enable Ranbooru, edit a tag/text field and slider, and press **Generate**.
-2. Look for `[Ranbooru] Saved 27 settings for txt2img` (or `img2img`) in the terminal.
+2. Look for `[Ranbooru] Saved 28 settings for txt2img` (or `img2img`) in the terminal.
 3. Verify `user/last_settings.json` exists.
 4. Without stopping WebUI, refresh the page or open a new tab. Saved values should reappear.
 5. A full WebUI restart should also restore them.

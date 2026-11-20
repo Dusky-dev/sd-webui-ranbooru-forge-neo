@@ -9,6 +9,7 @@ import types
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from urllib.parse import unquote_plus
 
 
 class Response:
@@ -70,7 +71,7 @@ class GelbooruResponseTests(unittest.TestCase):
         self.requests = RequestsStub()
         self.sleeps = []
         self.namespace = {
-            "requests": self.requests,
+            "requests": self.requests, "booru_http": self.requests, "unquote_plus": unquote_plus,
             "POST_AMOUNT": 100,
             "COUNT": 100,
             "random": types.SimpleNamespace(randrange=lambda stop: 0),
@@ -97,12 +98,16 @@ class GelbooruResponseTests(unittest.TestCase):
         self.assertEqual(self.adapter.get_data("", 1)["post"], [])
 
     def test_html_error_page_is_not_retried(self):
+        # sort:random is refused, then page 0 without it: no retry loop.
         self.requests.responses = [
-            Response(status=200, text="<html>Login required</html>", content_type="text/html", invalid_json=True)
+            Response(status=200, text="<html>Login required</html>", content_type="text/html", invalid_json=True),
+            Response(status=200, text="<html>Login required</html>", content_type="text/html", invalid_json=True),
         ]
         with self.assertRaisesRegex(RuntimeError, "HTML page instead of JSON"):
             self.adapter.get_data("", 1)
-        self.assertEqual(len(self.requests.calls), 1)
+        self.assertEqual(len(self.requests.calls), 2)
+        self.assertIn("sort:random", self.requests.calls[0][0])
+        self.assertNotIn("sort:random", self.requests.calls[1][0])
 
     def test_401_auth_error_and_no_credentials_in_exception(self):
         self.adapter = self.namespace["Gelbooru"](False, "super-secret-key", "12345")
@@ -123,13 +128,12 @@ class GelbooruResponseTests(unittest.TestCase):
         self.assertEqual(len(self.requests.calls), 1)
 
     def test_missing_credentials_reported_for_html_page(self):
-        self.requests.responses = [
-            Response(status=200, text="<html>Blocked</html>",
-                     content_type="text/html", invalid_json=True)
-        ]
+        blocked = Response(status=200, text="<html>Blocked</html>",
+                           content_type="text/html", invalid_json=True)
+        self.requests.responses = [blocked, blocked]
         with self.assertRaisesRegex(RuntimeError, "No API key/user ID pair was sent"):
             self.adapter.get_data("&tags=landscape", 1)
-        self.assertEqual(len(self.requests.calls), 1)
+        self.assertEqual(len(self.requests.calls), 2)
 
     def test_missing_credentials_reported_for_401(self):
         self.requests.responses = [Response(status=401)]
@@ -138,10 +142,9 @@ class GelbooruResponseTests(unittest.TestCase):
 
     def test_authenticated_html_explains_search_restrictions_without_secrets(self):
         self.adapter = self.namespace["Gelbooru"](False, "secret-abc", "uid-456")
-        self.requests.responses = [
-            Response(status=200, text="<html>Challenge</html>",
-                     content_type="text/html", invalid_json=True)
-        ]
+        challenge = Response(status=200, text="<html>Challenge</html>",
+                             content_type="text/html", invalid_json=True)
+        self.requests.responses = [challenge, challenge]
         with self.assertRaisesRegex(RuntimeError, "even though an API key and user ID") as caught:
             self.adapter.get_data("&tags=landscape", 1)
         self.assertNotIn("secret-abc", str(caught.exception))
@@ -220,7 +223,7 @@ class GelbooruResponseTests(unittest.TestCase):
             return count - 1
         self.namespace["random"].randrange = last_page
         self.requests.responses = [posts_result(count=201), posts_result(count=201)]
-        result = self.adapter.get_data("", 50)
+        result = self.adapter.get_data("&tags=sort:score", 50)
         self.assertEqual(len(result["post"]), 1)
         self.assertEqual(requested_ranges, [3])
         self.assertIn("&pid=0", self.requests.calls[0][0])
@@ -234,7 +237,7 @@ class GelbooruResponseTests(unittest.TestCase):
                      content_type="text/html", invalid_json=True),
         ]
         with redirect_stdout(io.StringIO()) as out:
-            result = self.adapter.get_data("&tags=cat_ears", 20)
+            result = self.adapter.get_data("&tags=cat_ears+sort:score", 20)
         self.assertEqual(result["post"][0]["id"], 1)
         self.assertEqual(self.namespace["COUNT"], 201)
         self.assertEqual(len(self.requests.calls), 2)
@@ -249,14 +252,14 @@ class GelbooruResponseTests(unittest.TestCase):
                      content_type="text/html", invalid_json=True)
         ]
         with self.assertRaisesRegex(RuntimeError, "HTML page instead of JSON"):
-            self.adapter.get_data("&tags=cat_ears", 20)
+            self.adapter.get_data("&tags=cat_ears+sort:score", 20)
         self.assertEqual(len(self.requests.calls), 1)
 
     def test_empty_deeper_page_falls_back_to_page_zero(self):
         self.namespace["random"].randrange = lambda count: 1
         self.requests.responses = [posts_result(count=300), posts_result(count=300, posts=[])]
         with redirect_stdout(io.StringIO()) as out:
-            result = self.adapter.get_data("&tags=cat_ears", 20)
+            result = self.adapter.get_data("&tags=cat_ears+sort:score", 20)
         self.assertEqual(len(result["post"]), 1)
         self.assertEqual(len(self.requests.calls), 2)
         self.assertIn("falling back to page=0", out.getvalue())
@@ -272,7 +275,7 @@ class GelbooruResponseTests(unittest.TestCase):
         self.namespace["random"].randrange = lambda count: 1
         second = posts_result(count=850, posts=[{"id": 999, "tags": "second"}])
         self.requests.responses = [posts_result(count=850), second]
-        result = self.adapter.get_data("&tags=test", 5)
+        result = self.adapter.get_data("&tags=test+sort:score", 5)
         self.assertEqual(result["post"][0]["id"], 999)
         self.assertEqual(self.namespace["COUNT"], 850)
         self.assertEqual(len(self.requests.calls), 2)
@@ -286,7 +289,7 @@ class GelbooruResponseTests(unittest.TestCase):
                      content_type="text/html", invalid_json=True),
         ]
         with redirect_stdout(io.StringIO()) as out:
-            result = self.adapter.get_data("&tags=cat_ears", 9)
+            result = self.adapter.get_data("&tags=cat_ears+sort:id", 9)
         self.assertTrue(result["post"])
         logs = out.getvalue()
         self.assertIn("page=0 HTTP=200 response=JSON", logs)
@@ -300,6 +303,69 @@ class GelbooruResponseTests(unittest.TestCase):
         self.requests.responses = [posts_result(count=0, posts=[])]
         self.assertEqual(self.adapter.get_data("&tags=impossible", 500)["post"], [])
         self.assertEqual(len(self.requests.calls), 1)
+
+    # --- sort:random and Gelbooru's paging limit ("Too deep!") ---
+
+    def test_random_posts_come_from_one_uncached_sort_random_request(self):
+        posts = [{"id": 7000 + i, "tags": "a"} for i in range(5)]
+        self.requests.responses = [posts_result(count=3194500, posts=posts)]
+        with redirect_stdout(io.StringIO()) as out:
+            result = self.adapter.get_data("&tags=-animated+1girl", 100)
+        self.assertEqual([p["id"] for p in result["post"]], [p["id"] for p in posts])
+        self.assertEqual(self.namespace["COUNT"], 3194500)
+        self.assertEqual(len(self.requests.calls), 1)
+        url, kwargs = self.requests.calls[0]
+        self.assertIn("&pid=0&tags=-animated+1girl+sort:random", url)
+        self.assertIs(kwargs["cache"], False)
+        self.assertIn("ids 7000, 7001", out.getvalue())
+
+    def test_sort_random_refused_walks_capped_pages(self):
+        self.namespace["random"].randrange = lambda count: count - 1
+        too_deep = Response(status=200, text="Too deep! Pull it back some.",
+                            content_type="text/html", invalid_json=True)
+        self.requests.responses = [too_deep, posts_result(count=900000),
+                                   posts_result(count=900000, posts=[{"id": 9, "tags": "x"}])]
+        with redirect_stdout(io.StringIO()) as out:
+            result = self.adapter.get_data("&tags=1girl", 100)
+        self.assertEqual(result["post"][0]["id"], 9)
+        self.assertIn("&pid=9", self.requests.calls[2][0])  # capped at 10 pages
+        self.assertIn("walking pages instead", out.getvalue())
+
+    def test_sort_random_empty_walks_pages(self):
+        self.requests.responses = [posts_result(count=50, posts=[]), posts_result(count=50)]
+        with redirect_stdout(io.StringIO()):
+            result = self.adapter.get_data("&tags=1girl", 3)
+        self.assertEqual(len(result["post"]), 1)
+        self.assertEqual(len(self.requests.calls), 2)
+
+    def test_zero_matches_with_sort_random_is_one_request(self):
+        self.requests.responses = [posts_result(count=0, posts=[])]
+        self.assertEqual(self.adapter.get_data("&tags=nothing", 50)["post"], [])
+        self.assertEqual(len(self.requests.calls), 1)
+
+    def test_own_sort_order_pages_are_capped_at_gelbooru_limit(self):
+        ranges = []
+        def pick(count):
+            ranges.append(count)
+            return count - 1
+        self.namespace["random"].randrange = pick
+        self.requests.responses = [posts_result(count=900000), posts_result(count=900000)]
+        with redirect_stdout(io.StringIO()):
+            self.adapter.get_data("&tags=1girl+sort:score", 100)
+        self.assertEqual(ranges, [10])
+        self.assertNotIn("sort:random", self.requests.calls[0][0])
+
+    def test_too_deep_plain_text_page_falls_back_to_page_zero(self):
+        self.namespace["random"].randrange = lambda count: 5
+        self.requests.responses = [
+            posts_result(count=900000),
+            Response(status=200, text="Too deep! Pull it back some.",
+                     content_type="text/plain", invalid_json=True),
+        ]
+        with redirect_stdout(io.StringIO()):
+            result = self.adapter.get_data("&tags=1girl+sort:score", 100)
+        self.assertEqual(result["post"][0]["id"], 1)
+        self.assertEqual(len(self.requests.calls), 2)  # no retries
 
     def test_post_id_search_is_single_request(self):
         self.requests.responses = [posts_result(count=1)]

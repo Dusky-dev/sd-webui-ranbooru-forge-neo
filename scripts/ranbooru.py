@@ -5,7 +5,7 @@ import random
 import requests
 import copy
 import dataclasses
-from urllib.parse import quote_plus
+from urllib.parse import quote_plus, unquote_plus
 import modules.scripts as scripts
 import gradio as gr
 import os
@@ -148,6 +148,7 @@ RANBOORU_STATE_FIELDS = (
     'only_poses',
     'strip_clothing',
     'names_all_boorus',
+    'skip_prompt_tags',
     'save_credentials',
 )
 
@@ -585,6 +586,35 @@ def remove_listed_tags(tags, bad_tags):
     return kept
 
 
+def prompt_tag_key(tag):
+    """Compare a prompt tag by its booru name.
+
+    Attention syntax is dropped, `(blue hair:1.2)` and `[blue_hair]` become
+    blue_hair; escaped parentheses are kept, `name \\(series\\)` is
+    name_(series); `<lora:...>` and other extra-network tags give None.
+    """
+    tag = str(tag or '').strip()
+    if not tag or tag.startswith('<'):
+        return None
+    tag = tag.replace('\\(', '\x00').replace('\\)', '\x01')
+    tag = re.sub(r'[()\[\]{}]', '', tag)
+    tag = re.sub(r':\s*-?[\d.]+\s*$', '', tag)
+    tag = tag.replace('\x00', '(').replace('\x01', ')')
+    return _normalize_pose_tag(tag) or None
+
+
+def prompt_tag_keys(prompt):
+    """prompt_tag_key of every comma-separated tag of a prompt (or prompts)."""
+    prompts = prompt if isinstance(prompt, (list, tuple)) else [prompt]
+    keys = set()
+    for text in prompts:
+        for tag in str(text or '').split(','):
+            key = prompt_tag_key(tag)
+            if key:
+                keys.add(key)
+    return keys
+
+
 def _matches_structure(words, nouns, modifiers):
     """True when the tag is a noun preceded only by (at least one) modifier."""
     for size in (2, 1):
@@ -762,6 +792,33 @@ def img2img_settings_from(p, img2img_class):
     }
 
 
+def per_image_values(value, total):
+    """A list with one entry per image: a single value repeated, or a list
+    cycled/trimmed to `total`."""
+    values = list(value) if isinstance(value, (list, tuple)) else [value]
+    if not values:
+        values = ['']
+    return [values[i % len(values)] for i in range(total)]
+
+
+def per_image_seeds(p, total, kind='seed'):
+    """The seed (or subseed) of every image of the txt2img run, which Forge
+    fills in all_seeds / all_subseeds. None when unknown: then each pass
+    gets a random one."""
+    seeds = list(getattr(p, f'all_{kind}s', None) or [])
+    if len(seeds) >= total:
+        return seeds[:total]
+    seed = getattr(p, kind, -1)
+    seed = seed[0] if isinstance(seed, (list, tuple)) and seed else seed
+    try:
+        base = int(seeds[0] if seeds else seed)
+    except (TypeError, ValueError):
+        return None
+    if base == -1:
+        return None
+    return [base + i for i in range(total)]
+
+
 def source_infotext(infotexts, first_image_index, num):
     """Infotext of the num-th generated image (a grid, if any, comes first)."""
     if not infotexts:
@@ -829,20 +886,15 @@ def send_image_to_controlnet(p, image, weight):
 
 
 def get_available_ratings(booru):
-    mature_ratings = gr.Radio.update(
-        choices=RATINGS[booru].keys(),
+    # gr.update: the per-component .update() methods were removed in Gradio 4.
+    return gr.update(
+        choices=list(RATINGS.get(booru, RATINGS['safebooru']).keys()),
         value="All"
     )
 
-    return mature_ratings
-
 
 def show_fringe_benefits(booru):
-    if booru == 'gelbooru':
-        return gr.Checkbox.update(visible=True)
-
-    else:
-        return gr.Checkbox.update(visible=False)
+    return gr.update(visible=(booru == 'gelbooru'))
 
 
 def check_exception(booru, parameters):
@@ -910,6 +962,89 @@ def resolve_booru_credentials(booru, api_key, user_id, save_credentials,
     return None, None
 
 
+# --- Booru HTTP and the Use cache option --------------------------------------
+# Booru API requests go through booru_http. With Use cache on they use a
+# Ranbooru-only cache (user/ranbooru_cache.sqlite, one hour); everything else
+# in the WebUI, and Ranbooru's own image downloads, use plain requests.
+RANBOORU_CACHE_FILE = os.path.join(user_data_dir, 'ranbooru_cache')
+# Credentials are left out of what is stored, whatever requests-cache defaults
+# the installed version has.
+CACHE_IGNORED_PARAMETERS = (
+    'api_key', 'user_id', 'login', 'password_hash', 'access_token',
+    'Authorization', 'X-API-Key',
+)
+CACHE_REFUSED_TEXT = (
+    'missing authentication', '"success":false', '"success": false',
+    'too deep', 'search error', 'api limited',
+)
+
+
+def cacheable_reply(response):
+    """Cache only successful API replies, never errors or refusals, so a
+    login added later is not answered from an hour-old refusal."""
+    try:
+        if response.status_code != 200:
+            return False
+        text = (response.text or '')[:4096].lstrip().lower()
+    except Exception:
+        return False
+    if not text.startswith(('[', '{', '<?xml', '<posts')):
+        return False
+    return not any(marker in text for marker in CACHE_REFUSED_TEXT)
+
+
+class BooruHTTP:
+    def __init__(self):
+        self.session = None
+
+    def set_cache(self, enabled):
+        if enabled and self.session is None:
+            try:
+                self.session = requests_cache.CachedSession(
+                    RANBOORU_CACHE_FILE,
+                    backend='sqlite',
+                    expire_after=3600,
+                    ignored_parameters=CACHE_IGNORED_PARAMETERS,
+                    # Gelbooru's Fringe Benefits cookie changes the results.
+                    match_headers=['Cookie'],
+                    filter_fn=cacheable_reply,
+                )
+            except Exception as exc:
+                print(f'[Ranbooru] Use cache unavailable ({exc}); continuing without it.')
+                self.session = None
+        elif not enabled and self.session is not None:
+            try:
+                self.session.close()
+            except Exception:
+                pass
+            self.session = None
+
+    def get(self, url, cache=True, **kwargs):
+        if cache and self.session is not None:
+            return self.session.get(url, **kwargs)
+        return requests.get(url, **kwargs)
+
+
+booru_http = BooruHTTP()
+
+
+def remove_legacy_global_cache():
+    """Older Ranbooru installed a process-wide cache; a "Reload UI" keeps it
+    patched into requests. Remove it, but only if it is Ranbooru's."""
+    try:
+        if not requests_cache.patcher.is_installed():
+            return
+        cache = requests_cache.get_cache()
+        name = str(getattr(cache, 'cache_name', '') or getattr(cache, 'db_path', ''))
+        if 'ranbooru_cache' in name:
+            requests_cache.uninstall_cache()
+    except Exception:
+        pass
+
+
+remove_legacy_global_cache()
+
+
 def redact_secrets(text, secrets=()):
     text = str(text)
     for secret in secrets:
@@ -931,7 +1066,7 @@ def fetch_booru_json(url, site, headers=None, auth=None, secrets=()):
     with credentials redacted. An empty body is an empty result.
     """
     try:
-        response = requests.get(
+        response = booru_http.get(
             url, headers=headers, auth=auth, timeout=20
         )
     except requests.exceptions.RequestException as exc:
@@ -997,7 +1132,7 @@ def fetch_xml_count(url, headers=None):
     Used only to pick a page in range, so any failure is soft.
     """
     try:
-        response = requests.get(url, headers=headers, timeout=20)
+        response = booru_http.get(url, headers=headers, timeout=20)
         match = POSTS_COUNT_PATTERN.search(getattr(response, 'text', '') or '')
     except (requests.exceptions.RequestException, AttributeError, TypeError):
         return None
@@ -1024,6 +1159,11 @@ def parse_post_id(site, post_id):
 
 
 class Booru:
+    # Sent as Referer when downloading post images for Use img2img. Boorus
+    # with hotlink protection redirect image requests without one to a web
+    # page, which then fails to open as an image.
+    image_referer = None
+
     def __init__(self, booru, booru_url):
         self.booru = booru
         self.booru_url = booru_url
@@ -1049,6 +1189,21 @@ class Gelbooru(Booru):
     class HTMLResponseError(RuntimeError):
         """A Gelbooru page returned HTML instead of JSON."""
 
+    class TooDeepError(HTMLResponseError):
+        """Gelbooru refused a page past its paging limit ("Too deep!")."""
+
+    # Gelbooru answers pages past its paging limit with a plain "Too deep!
+    # Pull it back some." (HTTP 200). In November 2026 the limit was about
+    # 1,000 posts: page (pid) 10 served, 11 refused at limit=100 (measured by
+    # the sd-webui-ranbooru-D fork; a user log showed pid 80 refused). Random
+    # posts therefore come from page 0 with sort:random, which Gelbooru draws
+    # from the whole search; pages are only walked, capped here, when the
+    # search has its own sort: order.
+    MAX_PAGES = 10
+
+    # img*.gelbooru.com redirects image requests without a gelbooru.com
+    # Referer to hotlink.php, which serves the post's HTML page.
+    image_referer = 'https://gelbooru.com/'
 
     def __init__(self, fringe_benefits, api_key=None, user_id=None):
         super().__init__(
@@ -1064,7 +1219,7 @@ class Gelbooru(Booru):
         self.user_id = user_id
         self.headers = {'User-Agent': 'Ranbooru-Forge-Neo/1.0'}
 
-    def _fetch_json(self, url, page_number=None):
+    def _fetch_json(self, url, page_number=None, cache=True):
         """Fetch and validate a post page, without exposing credentials in logs.
 
         Auth parameters are deliberately separate from self.last_url, and no
@@ -1078,8 +1233,9 @@ class Gelbooru(Booru):
 
         for attempt in range(3):
             try:
-                response = requests.get(
+                response = booru_http.get(
                     url,
+                    cache=cache,
                     params=auth,
                     cookies=cookies,
                     headers=self.headers,
@@ -1141,6 +1297,11 @@ class Gelbooru(Booru):
                 # HTML login/challenge/error pages are not transient JSON errors.
                 content_type = response.headers.get('Content-Type', '').lower()
                 prefix = (response.text or '').lstrip()[:120].lower()
+                if 'too deep' in prefix:
+                    raise self.TooDeepError(
+                        f'[Ranbooru] Gelbooru refused page {page_number}: it '
+                        'only pages about 1,000 posts into a search.'
+                    ) from None
                 if 'html' in content_type or prefix.startswith(('<!doctype', '<html')):
                     if not auth:
                         raise self.HTMLResponseError(
@@ -1218,23 +1379,61 @@ class Gelbooru(Booru):
             add_tags = ''
         requested_pages = max(1, int(max_pages))
 
+        # A typed sort:random gives a new draw from the same URL each time.
+        cache_pages = 'sort:random' not in unquote_plus(add_tags).lower()
+
         def fetch_page(page_number):
             # Credentials are supplied separately by _fetch_json.
             # Never print URLs or response bodies (they may include secrets).
             url = f'{self.booru_url}&pid={page_number}{id}{add_tags}'
             self.last_url = url
-            return self._fetch_json(url, page_number=page_number)
+            return self._fetch_json(
+                url, page_number=page_number, cache=cache_pages
+            )
 
         # Direct post-ID lookup: one request only, no need for a count probe.
         if id:
             data, COUNT = fetch_page(0)
             return data
 
+        # Random posts: one request, page 0 with sort:random, which Gelbooru
+        # draws from the whole search. Searches with their own sort: order
+        # walk pages instead (capped at Gelbooru's paging limit).
+        if 'sort:' not in unquote_plus(add_tags).lower():
+            random_tags = (
+                f'{add_tags}+sort:random' if '&tags=' in add_tags
+                else f'{add_tags}&tags=sort:random'
+            )
+            try:
+                # Same URL every time: never answer it from the cache.
+                url = f'{self.booru_url}&pid=0{random_tags}'
+                self.last_url = url
+                data, COUNT = self._fetch_json(url, page_number=0, cache=False)
+            except self.HTMLResponseError as exc:
+                print(
+                    f'[Ranbooru] Gelbooru sort:random was refused ({exc}); '
+                    'walking pages instead.'
+                )
+            else:
+                if data['post'] or COUNT == 0:
+                    sample = ', '.join(
+                        str(post.get('id')) for post in data['post'][:5]
+                    )
+                    print(
+                        f'[Ranbooru] Gelbooru sort:random: matching_posts='
+                        f'{COUNT}, {len(data["post"])} posts (ids {sample}...)'
+                    )
+                    return data
+                print(
+                    '[Ranbooru] Gelbooru sort:random returned no posts; '
+                    'walking pages instead.'
+                )
+
         # Page 0 tells us how many pages are really available for this query.
         # Do not select a random page until we have validated that response.
         first_page, COUNT = fetch_page(0)
         available_pages = max(1, (COUNT + POST_AMOUNT - 1) // POST_AMOUNT)
-        eligible_pages = min(requested_pages, available_pages)
+        eligible_pages = min(requested_pages, available_pages, self.MAX_PAGES)
         selected_page = random.randrange(eligible_pages)
         print(
             f'[Ranbooru] Gelbooru matching_posts={COUNT} '
@@ -1262,13 +1461,8 @@ class Gelbooru(Booru):
                 )
                 data = first_page
 
-        if COUNT > requested_pages * POST_AMOUNT:
-            print(
-                f' Processing up to {requested_pages * POST_AMOUNT} '
-                f'out of {COUNT} results.'
-            )
-        else:
-            print(f' Processing {COUNT} results.')
+        shown = min(eligible_pages * POST_AMOUNT, COUNT)
+        print(f' Processing up to {shown} out of {COUNT} results.')
         return data
 
     def get_post(self, add_tags, max_pages=10, id=''):
@@ -1488,7 +1682,7 @@ class AIBooru(Booru):
 
     def _count(self, add_tags):
         try:
-            response = requests.get(
+            response = booru_http.get(
                 'https://aibooru.online/counts/posts.json?'
                 + add_tags.lstrip('&'),
                 headers=self.headers,
@@ -1532,7 +1726,29 @@ class AIBooru(Booru):
         return {'post': posts}
 
     def get_post(self, add_tags, max_pages=10, id=''):
-        raise Exception("AIBooru does not support post IDs")
+        global COUNT
+
+        post_id = parse_post_id('AIBooru', id)
+        url = f'https://aibooru.online/posts/{post_id}.json'
+        self.last_url = url
+        try:
+            post = fetch_booru_json(url, 'AIBooru', self.headers)
+        except RuntimeError as exc:
+            if '(HTTP 404)' in str(exc):
+                raise ValueError(
+                    f'[Ranbooru] AIBooru post {post_id} was not found.'
+                ) from None
+            raise
+        if not isinstance(post, dict) or not post.get('file_url'):
+            raise ValueError(
+                f'[Ranbooru] AIBooru post {post_id} was not found or has no '
+                'image available.'
+            )
+        # Keep tag_string_artist/character/copyright for Only poses.
+        post['tags'] = post.get('tag_string') or ''
+        post['score'] = post.get('score') or 0
+        COUNT = 1
+        return {'post': [post]}
 
 
 class Danbooru(Booru):
@@ -1637,7 +1853,7 @@ class Danbooru(Booru):
             url = f'{self.booru_url}&page={page}{id}{add_tags}'
             self.last_url = url
             try:
-                response = requests.get(url, headers=self.headers, timeout=20)
+                response = booru_http.get(url, headers=self.headers, timeout=20)
             except requests.RequestException as exc:
                 raise RuntimeError(
                     f'[Ranbooru] Unable to contact Danbooru: {exc}'
@@ -1660,7 +1876,7 @@ class Danbooru(Booru):
         url = f'https://danbooru.donmai.us/posts/{id}.json'
         self.last_url = url
         try:
-            response = requests.get(url, headers=self.headers, timeout=20)
+            response = booru_http.get(url, headers=self.headers, timeout=20)
         except requests.RequestException as exc:
             raise RuntimeError(
                 f'[Ranbooru] Unable to contact Danbooru: {exc}'
@@ -1801,7 +2017,7 @@ class e621(Booru):
     def _request(self, url):
         self.last_url = url
         try:
-            response = requests.get(url, headers=self.headers, auth=self.auth, timeout=20)
+            response = booru_http.get(url, headers=self.headers, auth=self.auth, timeout=20)
         except requests.RequestException as exc:
             raise RuntimeError(f'[Ranbooru] Unable to contact e621: {exc}') from exc
         return self._read_api_json(response)
@@ -1875,7 +2091,7 @@ class e621(Booru):
             chunk = missing[start:start + self.LOOKUP_CHUNK]
             url = self.TAGS_URL + quote(','.join(chunk), safe=',')
             try:
-                response = requests.get(url, headers=self.headers, auth=self.auth, timeout=20)
+                response = booru_http.get(url, headers=self.headers, auth=self.auth, timeout=20)
                 rows = response.json() if response.status_code == 200 else None
             except (requests.RequestException, ValueError) as exc:
                 rows = None
@@ -2202,6 +2418,12 @@ class Script(scripts.Script):
                 value=saved_value('names_all_boorus', False)
             )
 
+            skip_prompt_tags = gr.Checkbox(
+                label="Skip tags already in prompt",
+                info="Leave out fetched tags you already typed, e.g. blue_hair when the prompt has (blue hair:1.2)",
+                value=saved_value('skip_prompt_tags', False)
+            )
+
             change_dash = gr.Checkbox(
                 label='Convert "_" to spaces',
                 value=saved_value('change_dash', False)
@@ -2419,6 +2641,7 @@ class Script(scripts.Script):
             only_poses,
             strip_clothing,
             names_all_boorus,
+            skip_prompt_tags,
             api_key,
             user_id,
             save_credentials,
@@ -2586,6 +2809,7 @@ class Script(scripts.Script):
         only_poses,
         strip_clothing,
         names_all_boorus,
+        skip_prompt_tags,
         api_key,
         user_id,
         save_credentials,
@@ -2601,22 +2825,8 @@ class Script(scripts.Script):
                 locals()
             )
 
-        # Manage Cache
-        if (
-            use_cache
-            and not requests_cache.patcher.is_installed()
-        ):
-            requests_cache.install_cache(
-                'ranbooru_cache',
-                backend='sqlite',
-                expire_after=3600
-            )
-
-        elif (
-            not use_cache
-            and requests_cache.patcher.is_installed()
-        ):
-            requests_cache.uninstall_cache()
+        # Use cache applies to Ranbooru's own booru API requests only.
+        booru_http.set_cache(use_cache)
 
         if enabled:
             # MRU is updated only by a genuine Ranbooru generation attempt;
@@ -3010,16 +3220,27 @@ class Script(scripts.Script):
                     else preview_urls
                 )
 
+                image_headers = dict(api_url.headers)
+                if api_url.image_referer:
+                    image_headers['Referer'] = api_url.image_referer
+
                 for img in image_urls:
 
                     try:
                         response = requests.get(
                             img,
-                            headers=api_url.headers,
+                            headers=image_headers,
                             timeout=20
                         )
 
                         response.raise_for_status()
+
+                        content_type = response.headers.get('Content-Type', '')
+                        if content_type.startswith('text/'):
+                            raise ValueError(
+                                f'the server sent a web page ({content_type}) '
+                                f'instead of the image'
+                            )
 
                         image = Image.open(
                             BytesIO(response.content)
@@ -3061,6 +3282,12 @@ class Script(scripts.Script):
 
             new_prompts = []
 
+            # Tags the user already typed (Skip tags already in prompt).
+            typed_tag_keys = (
+                prompt_tag_keys(self.original_prompt)
+                if skip_prompt_tags else set()
+            )
+
             # Cleaning Tags
             for prompt in prompts:
 
@@ -3068,6 +3295,12 @@ class Script(scripts.Script):
                     html.unescape(prompt).split(','),
                     bad_tags
                 )
+
+                if typed_tag_keys:
+                    prompt_tags = [
+                        tag for tag in prompt_tags
+                        if prompt_tag_key(tag) not in typed_tag_keys
+                    ]
 
                 if e621_dropped_tags:
                     prompt_tags = [
@@ -3238,6 +3471,7 @@ class Script(scripts.Script):
         only_poses,
         strip_clothing,
         names_all_boorus,
+        skip_prompt_tags,
         api_key,
         user_id,
         save_credentials,
@@ -3274,41 +3508,85 @@ class Script(scripts.Script):
                     self.last_img[0]
                 )
 
-            # Second pass: a real img2img run on the booru images. Copy the
+            # Second pass: real img2img runs on the booru images. Copy the
             # generation settings that exist on this WebUI build (styles,
             # variation seed, distilled CFG, clip skip and other overrides...),
             # but not scripts, which would run Ranbooru again.
-            settings = img2img_settings_from(p, StableDiffusionProcessingImg2Img)
-            settings.update(
-                sd_model=shared.sd_model,
-                outpath_samples=(
-                    shared.opts.outdir_samples
-                    or shared.opts.outdir_img2img_samples
-                ),
-                outpath_grids=(
-                    shared.opts.outdir_grids
-                    or shared.opts.outdir_img2img_grids
-                ),
-                steps=self.real_steps,
-                width=width,
-                height=height,
-                init_images=self.last_img,
-                denoising_strength=denoising,
+            # Forge Neo takes at most batch_size init images per run, so run
+            # one img2img pass per batch, each with its own images, prompts
+            # and seeds.
+            batch_size = max(1, int(p.batch_size))
+            n_iter = max(1, int(p.n_iter))
+            total = batch_size * n_iter
+            prompts = per_image_values(p.prompt, total)
+            negative_prompts = per_image_values(p.negative_prompt, total)
+            seeds = per_image_seeds(p, total)
+            subseeds = per_image_seeds(p, total, 'subseed')
+            init_images = per_image_values(self.last_img, total)
+
+            base_settings = img2img_settings_from(
+                p, StableDiffusionProcessingImg2Img
             )
-            p = StableDiffusionProcessingImg2Img(**settings)
+            images, infotexts, first_image = [], [], 0
+            for batch in range(n_iter):
+                state = getattr(shared, 'state', None)
+                if state is not None and (
+                    getattr(state, 'interrupted', False)
+                    or getattr(state, 'stopping_generation', False)
+                ):
+                    break
 
-            proc = process_images(p)
+                part = slice(batch * batch_size, (batch + 1) * batch_size)
+                settings = dict(base_settings)
+                settings.update(
+                    sd_model=shared.sd_model,
+                    outpath_samples=(
+                        shared.opts.outdir_samples
+                        or shared.opts.outdir_img2img_samples
+                    ),
+                    outpath_grids=(
+                        shared.opts.outdir_grids
+                        or shared.opts.outdir_img2img_grids
+                    ),
+                    prompt=prompts[part],
+                    negative_prompt=negative_prompts[part],
+                    seed=seeds[part] if seeds else -1,
+                    batch_size=batch_size,
+                    n_iter=1,
+                    steps=self.real_steps,
+                    width=width,
+                    height=height,
+                    init_images=init_images[part],
+                    denoising_strength=denoising,
+                )
+                if subseeds and 'subseed' in settings:
+                    settings['subseed'] = subseeds[part]
+                proc = process_images(
+                    StableDiffusionProcessingImg2Img(**settings)
+                )
 
-            processed.images = proc.images
-            processed.infotexts = proc.infotexts
+                if n_iter == 1:
+                    # One run: keep Forge's own grid, if it made one.
+                    images = list(proc.images)
+                    infotexts = list(proc.infotexts)
+                    first_image = proc.index_of_first_image
+                else:
+                    # Several runs: their images only, no per-run grids.
+                    start = proc.index_of_first_image or 0
+                    images.extend(proc.images[start:])
+                    infotexts.extend(proc.infotexts[start:])
+
+            processed.images = images
+            processed.infotexts = infotexts
+            processed.index_of_first_image = first_image
 
             # Show the source booru image(s) after the results, each with the
             # infotext of the image it produced.
             sources = self.last_img[:1] if use_last_img else self.last_img
-            for num, img in enumerate(sources):
+            for num, img in enumerate(sources[:len(images) - first_image]):
                 processed.images.append(img)
                 processed.infotexts.append(
-                    source_infotext(proc.infotexts, proc.index_of_first_image, num)
+                    source_infotext(infotexts, first_image, num)
                 )
 
     def random_number(self, sorting_order, size, available_count):
