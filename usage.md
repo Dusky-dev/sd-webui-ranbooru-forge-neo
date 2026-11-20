@@ -39,12 +39,6 @@ You can use the prompt plus the original image of the random booru pictures to c
 
 ## Additional Modes
 These can be used with the Basic Search and img2img examples.
-### Mixing prompts
-By enabling `Mix prompts` each image will be created using a mixture of N different booru posts where N is defined by the `Mix Amount` parameter.
-### Chaos Mode
-By enabling `Chaos Mode` each image will have an amount of tags moved to the negative prompt. The amount is defined by the `Chaos Amount` parameter, for example 0.5 means 50% of the tags will be moved to the negative prompt. Using the `Less Chaos` option won't move the tags you manually insert in the negative prompt.
-### Negative Mode
-By enabling `Negative Mode` each image will have all tags moved to the negative prompt.
 ### Only Poses
 Enable `Only poses` to keep the composition of the random posts (pose, action, expression, camera angle, subject count like `1girl`) while removing the tags that describe *who* is in the picture:
 - **Appearance:** hair colour, length and style (`long_hair`, `twintails`, `blunt_bangs`), eyes (`blue_eyes`, `slit_pupils`), skin, body type (`large_breasts`, `muscular`), animal ears, tails, horns, wings and halos, moles, scars and freckles.
@@ -55,9 +49,6 @@ Enable `Only poses` to keep the composition of the random posts (pose, action, e
 
 Tags from Danbooru's posture, gestures, hands, sexual positions, face (expressions), image composition, focus and character count [tag groups](https://danbooru.donmai.us/wiki_pages/tag_groups) are never removed, so `closed_eyes`, `looking_back`, `hand_in_own_hair` and `skirt_lift` stay.
 
-Both options also apply to tags added by Deepbooru (including the name list, since Deepbooru outputs Danbooru tag names). The lists use Danbooru's tag names, which Gelbooru, Safebooru and most other boorus share; e621 uses its own vocabulary, so e621 posts also get e621-specific lists built from e621's own [tag groups](https://e621.net/wiki_pages/tag_groups) (anatomy, weight, markings; pose, facial expressions and touching are never removed). These cover tufts, markings, pawpads, countershading, tail and ear shapes and body weight. Body-plan tags such as `anthro`, `feral` and `biped` are kept. With **Strip clothing & accessories**, e621 posts also lose e621's garment vocabulary (`topwear`, `bottomwear`, `legwear`, `black_bottomwear`, `denim_bottomwear`, piercings, uniforms, costumes), from its clothes, outfits and piercing tag groups. As on Danbooru, tags saying whether someone is dressed (`clothing`, `clothed`, `nude`, `topless`, `underwear_only`) and clothing actions or states (`shirt_lift`, `open_clothing`, `torn_topwear`, `wet_clothing`) are kept. Anything that gets through can be removed with **Tags to remove (post)**.
+The lists use Danbooru's tag names, which Gelbooru, Safebooru and most other boorus share; e621 uses its own vocabulary, so e621 posts also get e621-specific lists built from e621's own [tag groups](https://e621.net/wiki_pages/tag_groups) (anatomy, weight, markings; pose, facial expressions and touching are never removed). These cover tufts, markings, pawpads, countershading, tail and ear shapes and body weight. Body-plan tags such as `anthro`, `feral` and `biped` are kept. With **Strip clothing & accessories**, e621 posts also lose e621's garment vocabulary (`topwear`, `bottomwear`, `legwear`, `black_bottomwear`, `denim_bottomwear`, piercings, uniforms, costumes), from its clothes, outfits and piercing tag groups. As on Danbooru, tags saying whether someone is dressed (`clothing`, `clothed`, `nude`, `topless`, `underwear_only`) and clothing actions or states (`shirt_lift`, `open_clothing`, `torn_topwear`, `wet_clothing`) are kept. Anything that gets through can be removed with **Tags to remove (post)**.
 
 The lists live in `pose_tag_groups.json` and `pose_name_tags.json`. To refresh them from Danbooru, run `python tools/build_pose_tag_groups.py` (or add `groups` / `names` to rebuild one file).
-
-### LoRAnado
-By enabling `Use LoRAnado` you can add random LoRAs to the prompt. This can lead to interesting results. Once you have enabled the option you have to choose a folder from your LoRA path, this can be your main folder or any subfolder (right now only the LoRAs contained in the set folder will be used, not the ones in other subfolders). You now need to set the min and max weight values you want to generate and the amount of random LoRAs to use. You can also set custom weights for each LoRA by separating them with a comma (e.g. 0.2,0.3,0.5). If you want to use the same LoRAs of the previous generation, enable `Lock Previous LoRAs`.
