@@ -58,6 +58,7 @@ Also check my article on [CivitAI](https://civitai.com/articles/3357/ranbooru-th
 - Removed LoRAnado, the File panel (tags_search.txt / tags_remove.txt), Deepbooru (deleted from Forge Neo in July 2025), and Mix prompts, Chaos mode, Negative mode and Use same seed. Old `user/search` and `user/remove` files are left on disk but no longer used.
 - Send to ControlNet now targets Forge Neo's built-in ControlNet.
 - Use img2img works with Batch count above 1 (one img2img pass per batch); Gelbooru uses `sort:random`; Use cache only caches Ranbooru's booru requests; AIBooru supports post IDs; new Skip tags already in prompt option.
+- Use img2img downloads Gelbooru images again (Gelbooru's hotlink protection had served a web page in their place).
 
 ### 1.2
 - Added the ability to use * in the remove tags to remove every tag that contains the word

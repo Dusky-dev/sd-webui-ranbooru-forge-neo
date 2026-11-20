@@ -192,6 +192,13 @@ def gelbooru_reply(url):
 def fake_get(url, **kwargs):
     if 'gelbooru.com/index.php' in url:
         return gelbooru_reply(url)
+    if 'img.gelbooru.com/' in url:
+        # Hotlink protection: without a gelbooru.com Referer the image server
+        # redirects to hotlink.php, which serves the post's HTML page.
+        headers = {k.lower(): v for k, v in (kwargs.get('headers') or {}).items()}
+        if not headers.get('referer', '').startswith('https://gelbooru.com/'):
+            return Reply(content=b'<!DOCTYPE html><html></html>',
+                         ctype='text/html; charset=UTF-8')
     if '/images/' in url:
         return Reply(content=png_bytes(), ctype='image/png')
     if 'limit=0' in url:
@@ -525,6 +532,13 @@ class ForgeHarnessTests(unittest.TestCase):
             self.assertIn('gel_', p.prompt)
         finally:
             http.set_cache(False)
+
+    def test_gelbooru_img2img_downloads_past_hotlink_protection(self):
+        p, processed = self.generate(1, 1, booru='gelbooru', use_img2img=True,
+                                     api_key='KEY', user_id='42')
+        sources = [c for c in self.calls if getattr(c, 'init_images', None)]
+        self.assertEqual(len(sources), 1)
+        self.assertEqual(sources[0].init_images[0].size, (64, 48))
 
     def test_legacy_global_cache_is_removed_only_if_it_is_ranbooru(self):
         import requests_cache

@@ -1159,6 +1159,11 @@ def parse_post_id(site, post_id):
 
 
 class Booru:
+    # Sent as Referer when downloading post images for Use img2img. Boorus
+    # with hotlink protection redirect image requests without one to a web
+    # page, which then fails to open as an image.
+    image_referer = None
+
     def __init__(self, booru, booru_url):
         self.booru = booru
         self.booru_url = booru_url
@@ -1196,6 +1201,9 @@ class Gelbooru(Booru):
     # search has its own sort: order.
     MAX_PAGES = 10
 
+    # img*.gelbooru.com redirects image requests without a gelbooru.com
+    # Referer to hotlink.php, which serves the post's HTML page.
+    image_referer = 'https://gelbooru.com/'
 
     def __init__(self, fringe_benefits, api_key=None, user_id=None):
         super().__init__(
@@ -3212,16 +3220,27 @@ class Script(scripts.Script):
                     else preview_urls
                 )
 
+                image_headers = dict(api_url.headers)
+                if api_url.image_referer:
+                    image_headers['Referer'] = api_url.image_referer
+
                 for img in image_urls:
 
                     try:
                         response = requests.get(
                             img,
-                            headers=api_url.headers,
+                            headers=image_headers,
                             timeout=20
                         )
 
                         response.raise_for_status()
+
+                        content_type = response.headers.get('Content-Type', '')
+                        if content_type.startswith('text/'):
+                            raise ValueError(
+                                f'the server sent a web page ({content_type}) '
+                                f'instead of the image'
+                            )
 
                         image = Image.open(
                             BytesIO(response.content)
