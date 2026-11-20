@@ -795,7 +795,7 @@ CREDENTIAL_BOORUS = {
     },
     'rule34': {
         'title': 'Rule34 API Credentials',
-        'key_hint': 'Enter your Rule34 API key (Account > Options on rule34.xxx)',
+        'key_hint': 'Enter your Rule34 API key (My Account > Options on rule34.xxx)',
         'user_label': 'User ID',
         'user_hint': 'Enter your Rule34 user ID',
     },
@@ -1228,6 +1228,8 @@ class GelbooruBeta(Booru):
         )
 
     def _normalize(self, data):
+        if data is None:
+            return []
         if not isinstance(data, list):
             raise RuntimeError(
                 f'[Ranbooru] {self.booru} returned an unexpected '
@@ -1235,12 +1237,13 @@ class GelbooruBeta(Booru):
             )
         posts = []
         for post in data:
-            # A missing post ID still returns one row with a null image.
-            if not isinstance(post, dict) or not post.get('image'):
+            if not isinstance(post, dict):
                 continue
-            file_url = post.get('file_url') or ''
+            file_url = str(post.get('file_url') or '')
             if not file_url.startswith('http') or file_url.endswith('/'):
-                if not post.get('directory'):
+                # A missing post ID still returns one row with a null image
+                # and a file_url ending in "/".
+                if not (post.get('image') and post.get('directory')):
                     continue
                 file_url = (
                     f"{self.image_host}/{post['directory']}/{post['image']}"
@@ -2012,8 +2015,8 @@ class Script(scripts.Script):
         """Gradio updates for the credentials group of the selected booru.
 
         Outputs: group, heading, api_key, user_id, status, clear button.
-        Textbox values always come from this booru's saved credentials (or are
-        emptied), so a key typed for one site never stays behind for another.
+        The textboxes are always emptied: saved credentials are read from disk
+        at generation time, so no key stays in the page for another site.
         """
         spec = CREDENTIAL_BOORUS.get(booru)
         if spec is None:
@@ -2044,12 +2047,12 @@ class Script(scripts.Script):
             gr.update(value=f"### {spec['title']}"),
             gr.update(
                 visible=not has_saved,
-                value=api_key if has_saved else "",
+                value="",
                 placeholder=spec['key_hint']
             ),
             gr.update(
                 visible=not has_saved,
-                value=user_id if has_saved else "",
+                value="",
                 label=spec['user_label'],
                 placeholder=spec['user_hint']
             ),
@@ -2243,10 +2246,7 @@ class Script(scripts.Script):
                     placeholder=credential_spec['key_hint'],
                     type="password",
                     visible=initial_api_key_visible,
-                    value=saved_creds.get(
-                        'api_key',
-                        ''
-                    )
+                    value=""
                 )
 
                 user_id = gr.Textbox(
@@ -2254,10 +2254,7 @@ class Script(scripts.Script):
                     label=credential_spec['user_label'],
                     placeholder=credential_spec['user_hint'],
                     visible=initial_user_id_visible,
-                    value=saved_creds.get(
-                        'user_id',
-                        ''
-                    )
+                    value=""
                 )
 
                 save_credentials = gr.Checkbox(
@@ -2659,10 +2656,10 @@ class Script(scripts.Script):
         state_names = tuple(state_controls)
         load_outputs = [state_controls[name] for name in state_names]
         load_outputs.extend([
-            gelbooru_credentials_group,
             enabled.accordion,
             lora_enabled.accordion,
         ])
+        load_outputs.extend(credential_outputs)
 
         def restore_browser_page():
             state = load_ranbooru_settings(is_img2img)
@@ -2744,10 +2741,11 @@ class Script(scripts.Script):
             if type(loranado_on) is not bool:
                 loranado_on = bool(lora_enabled.value)
             results.extend([
-                gr.update(visible=(current_booru == 'gelbooru')),
                 gr.update(open=enabled_on),
                 gr.update(open=loranado_on),
             ])
+            # The credentials panel follows the restored booru.
+            results.extend(self.booru_credential_updates(current_booru))
             print(f'[Ranbooru] Restored {len(state)} settings for '
                   f"{'img2img' if is_img2img else 'txt2img'} on browser load")
             return results

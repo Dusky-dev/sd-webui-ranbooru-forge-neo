@@ -216,6 +216,17 @@ class GelbooruBetaTests(AdapterTestBase):
         self.assertEqual(data['post'][1]['file_url'], 'https://img.xbooru.com/images/12/b.jpg')
         self.assertEqual(data['post'][0]['score'], 0)
 
+    def test_rule34_shapes_file_url_only_and_null_body(self):
+        rows = [{'id': 5, 'file_url': 'https://api-cdn.rule34.xxx/images/1/x.jpg', 'tags': 'solo'},
+                dapi_post(6, image=None, directory=None, tags='',
+                          file_url='https://safebooru.org/images//')]
+        self.requests.responses = [count_xml(2), Response(data=rows, text='[..]'),
+                                   count_xml(2), Response(data=None, text='null')]
+        data, _ = self.quiet(self.ns['Rule34'](username='1', api_key='k').get_data, '', 1)
+        self.assertEqual([p['id'] for p in data['post']], [5])
+        data, _ = self.quiet(self.ns['Rule34'](username='1', api_key='k').get_data, '', 1)
+        self.assertEqual(data, {'post': []})
+
     def test_post_id(self):
         self.requests.responses = [Response(data=[dapi_post(1000)], text='[..]')]
         data, _ = self.quiet(self.ns['Safebooru']().get_post, '&tags=-animated', 10, ' 1000 ')
@@ -329,6 +340,9 @@ class CredentialResolutionTests(AdapterTestBase):
         manager = CredentialManagerStub({'gelbooru': {'api_key': 'gelkey', 'user_id': '1'}})
         for booru in ('rule34', 'e621'):
             self.assertEqual(self.resolve(booru, '', '', False, manager), (None, None))
+        # Even if the page still held Gelbooru's key, Gelbooru uses its saved one.
+        self.assertEqual(self.resolve('gelbooru', 'other', '2', True, manager), ('gelkey', '1'))
+        self.assertEqual(manager.writes, [])
 
     def test_typed_credentials_used_and_saved_on_request(self):
         manager = CredentialManagerStub()
@@ -347,8 +361,65 @@ class CredentialResolutionTests(AdapterTestBase):
         self.assertEqual(set(self.ns['CREDENTIAL_BOORUS']), {'gelbooru', 'rule34', 'e621'})
 
 
+class CredentialPanelTests(unittest.TestCase):
+    """booru_credential_updates, run with stub Gradio and credentials."""
+
+    @classmethod
+    def setUpClass(cls):
+        source = Path(__file__).resolve().parents[1] / 'scripts' / 'ranbooru.py'
+        tree = ast.parse(source.read_text(encoding='utf-8'))
+        script = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == 'Script')
+        methods = [n for n in script.body if isinstance(n, ast.FunctionDef) and n.name in (
+            'booru_credential_updates', 'load_booru_credentials', 'clear_booru_credentials')]
+        spec = next(n for n in tree.body if isinstance(n, ast.Assign)
+                    and getattr(n.targets[0], 'id', None) == 'CREDENTIAL_BOORUS')
+        panel = ast.ClassDef(name='Panel', bases=[], keywords=[], body=methods, decorator_list=[])
+        cls.module = compile(ast.fix_missing_locations(
+            ast.Module(body=[spec, panel], type_ignores=[])), str(source), 'exec')
+
+    def setUp(self):
+        manager = CredentialManagerStub({'gelbooru': {'api_key': 'GELKEY', 'user_id': '42'}})
+        manager.credentials_file = '/ext/user/credentials/credentials.json'
+        manager.cleared = []
+        manager.clear_booru_credentials = manager.cleared.append
+        self.manager = manager
+        self.ns = {'gr': types.SimpleNamespace(update=lambda **kw: kw),
+                   'credentials_manager': manager}
+        exec(self.module, self.ns)
+        self.panel = self.ns['Panel']()
+
+    def test_saved_key_is_never_put_in_the_page(self):
+        group, heading, key, user, status, clear = self.panel.load_booru_credentials('gelbooru')
+        self.assertEqual((key['value'], user['value']), ('', ''))
+        self.assertFalse(key['visible'])
+        self.assertTrue(status['visible'] and clear['visible'])
+        self.assertIn('credentials.json', status['value'])
+
+    def test_fields_follow_the_selected_booru(self):
+        group, heading, key, user, status, clear = self.panel.load_booru_credentials('e621')
+        self.assertTrue(group['visible'] and key['visible'])
+        self.assertEqual(user['label'], 'Username')
+        self.assertIn('e621', heading['value'])
+        self.assertFalse(status['visible'])
+        group, *_ = self.panel.load_booru_credentials('safebooru')
+        self.assertFalse(group['visible'])
+
+    def test_clear_only_clears_selected_booru(self):
+        _, _, key, _, status, _ = self.panel.clear_booru_credentials('rule34')
+        self.assertEqual(self.manager.cleared, ['rule34'])
+        self.assertTrue(key['visible'])
+        self.panel.clear_booru_credentials('safebooru')
+        self.assertEqual(self.manager.cleared, ['rule34'])
+
+
 class CredentialWiringTests(unittest.TestCase):
     """The credentials panel must follow the booru however it changes."""
+
+    def test_browser_restore_updates_the_credentials_panel(self):
+        source = (Path(__file__).resolve().parents[1] / 'scripts' / 'ranbooru.py').read_text(encoding='utf-8')
+        self.assertNotIn('gelbooru_credentials_group', source)
+        self.assertIn('load_outputs.extend(credential_outputs)', source)
+        self.assertIn('results.extend(self.booru_credential_updates(current_booru))', source)
 
     def test_loader_uses_change_and_selected_booru(self):
         source = (Path(__file__).resolve().parents[1] / 'scripts' / 'ranbooru.py').read_text(encoding='utf-8')
