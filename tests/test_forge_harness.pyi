@@ -270,7 +270,8 @@ class ForgeHarnessTests(unittest.TestCase):
         values.update(enabled=True, booru='safebooru', tags='1girl', max_pages=5,
                       use_cache=False, remove_tags='', api_key='', user_id='', post_id='',
                       use_img2img=False, use_ip=False, same_prompt=False,
-                      only_poses=False, strip_clothing=False, shuffle_tags=False)
+                      only_poses=False, strip_clothing=False, replace_clothing=False,
+                      clothing_tags='', shuffle_tags=False)
         values.update(overrides)
         return [values[name] for name in names]
 
