@@ -741,8 +741,8 @@ CLOTHING_SLOT_NOUNS = {
     ),
     'full': (
         'dress dresses swimsuit bodysuit leotard jumpsuit overalls kimono '
-        'yukata uniform outfit costume robe gown apron bikini sundress romper '
-        'unitard armor pajamas nightgown babydoll lingerie qipao cheongsam '
+        'yukata uniform outfit costume robe gown bikini sundress romper '
+        'unitard pajamas nightgown babydoll lingerie qipao cheongsam '
         'hanfu hanbok plugsuit wetsuit chemise teddy suit tuxedo habit '
         'cassock dirndl spacesuit catsuit tracksuit swimwear bathrobe '
         'kigurumi onesie fursuit coveralls bikesuit springsuit bodystocking '
@@ -777,15 +777,15 @@ CLOTHING_NOUN_SLOT = {
     for slot, nouns in CLOTHING_SLOT_NOUNS.items()
     for noun in nouns.split()
 }
+CLOTHING_TRIM_WORDS = frozenset((
+    'ornament', 'ornaments', 'bow', 'ribbon', 'flower', 'feather', 'tassel',
+    'cuffs', 'bell', 'garter', 'set', 'clothing',
+))
 # Anything else (jewelry, eyewear, makeup, neckwear) is an accessory.
 CLOTHING_OTHER_SLOT = 'accessory'
 # Slots that leave a figure undressed when stripped; the random fallback
 # only fills these, so `nude, earrings` posts are not given a shirt.
 CLOTHING_BODY_SLOTS = ('top', 'bottom', 'full')
-# A dress can stand in for a top or a skirt, and a top plus a skirt for a dress.
-CLOTHING_SLOT_ALTERNATES = {
-    'top': ('full',), 'bottom': ('full',), 'full': ('top', 'bottom'),
-}
 
 
 def clothing_slot(tag):
@@ -793,9 +793,13 @@ def clothing_slot(tag):
     headwear, handwear or accessory."""
     norm = POSE_QUALIFIER_PATTERN.sub('', _normalize_pose_tag(tag)).strip('_')
     words = norm.split('_')
-    # Then without the last word: hat_ornament, boxers_clothing (a prompt
-    # tag's `boxers \(clothing\)` loses its parentheses).
-    for end in (len(words), len(words) - 1):
+    ends = [len(words)]
+    # Then without a trailing trim word: hat_ornament, glove_cuffs,
+    # boxers_clothing (a prompt tag's `boxers \(clothing\)` loses its
+    # parentheses). Not for any word: sweater_guard is no sweater.
+    if words[-1] in CLOTHING_TRIM_WORDS:
+        ends.append(len(words) - 1)
+    for end in ends:
         for size in (3, 2, 1):
             if end >= size:
                 slot = CLOTHING_NOUN_SLOT.get('_'.join(words[end - size:end]))
@@ -807,10 +811,14 @@ def clothing_slot(tag):
 def swap_clothing_tags(tags, replacements, is_clothing, rng=random, taken=()):
     """Drop the clothing tags and put the user's own clothing in their place.
 
-    Each stripped slot (top, bottom, ...) gets one replacement of the same
-    slot, at the first stripped tag of that slot. If no replacement fits a
-    stripped top, bottom or full-body garment, one random replacement is used
-    instead. Replacements whose tag is in `taken` (already in the prompt) are
+    The body outfit is chosen once per prompt: one full-body garment, or a
+    top and/or a bottom, never both. A stripped dress prefers one of the
+    user's dresses, then a top plus a bottom; a stripped top or bottom
+    prefers the same kind, then a dress. If nothing fits, one random tag of
+    the user's is used, so a stripped garment never leaves the figure
+    undressed. These go where the first body garment was. Other kinds
+    (legwear, shoes, ...) get one tag of the same kind each, in place.
+    Replacements whose tag is in `taken` (already in the prompt) are
     skipped; replacement text is kept as the user typed it.
     """
     taken = set(taken)
@@ -824,9 +832,9 @@ def swap_clothing_tags(tags, replacements, is_clothing, rng=random, taken=()):
 
     used = set()
 
-    def pick(slots):
+    def pick(slot):
         choices = [item for item in pool
-                   if item[2] in slots and item[1] not in used]
+                   if (slot is None or item[2] == slot) and item[1] not in used]
         if not choices:
             return None
         text, key, _ = rng.choice(choices)
@@ -834,40 +842,37 @@ def swap_clothing_tags(tags, replacements, is_clothing, rng=random, taken=()):
         return text
 
     result = []
-    seen_slots = set()
-    body_index = None  # where the first undressing strip happened
-    body_filled = False
+    stripped = set()
+    body_index = None  # where the first body garment was
     for tag in tags:
         if not is_clothing(tag):
             result.append(tag)
             continue
         slot = clothing_slot(tag)
-        if slot in seen_slots:
-            continue
-        seen_slots.add(slot)
-        if slot in CLOTHING_BODY_SLOTS and body_index is None:
-            body_index = len(result)
-        chosen = pick((slot,))
-        if chosen is None:
-            alternates = CLOTHING_SLOT_ALTERNATES.get(slot, ())
-            # full -> top and bottom; top/bottom -> a dress, unless one of
-            # them already came in for the other half.
-            if slot == 'full':
-                found = [t for t in (pick(('top',)), pick(('bottom',))) if t]
-                result.extend(found)
-                body_filled = body_filled or bool(found)
-                continue
-            if not any(s in seen_slots and s != slot for s in alternates):
-                chosen = pick(alternates)
-        if chosen is not None:
-            result.append(chosen)
-            if slot in CLOTHING_BODY_SLOTS:
-                body_filled = True
+        if slot in CLOTHING_BODY_SLOTS:
+            if body_index is None:
+                body_index = len(result)
+        elif slot not in stripped:
+            chosen = pick(slot)
+            if chosen is not None:
+                result.append(chosen)
+        stripped.add(slot)
 
-    if body_index is not None and not body_filled:
-        chosen = pick({item[2] for item in pool})
-        if chosen is not None:
-            result.insert(body_index, chosen)
+    if body_index is not None:
+        has = {item[2] for item in pool}
+        halves = [s for s in ('top', 'bottom') if s in stripped]
+        if 'full' in stripped and 'full' in has:
+            outfit = [pick('full')]
+        elif halves and any(s in has for s in halves):
+            outfit = [pick(s) for s in halves]
+        elif 'full' in stripped:
+            outfit = [pick('top'), pick('bottom')]
+        else:
+            outfit = [pick('full')]
+        outfit = [text for text in outfit if text]
+        if not outfit:
+            outfit = [pick(None)]
+        result[body_index:body_index] = [text for text in outfit if text]
     return result
 
 

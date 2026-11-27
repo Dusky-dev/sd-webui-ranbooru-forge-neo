@@ -47,7 +47,7 @@ Enable `Only poses` to keep the composition of the random posts (pose, action, e
 
 `Strip clothing & accessories` is a separate toggle (off by default). It works with or without `Only poses` and removes outfits, legwear, footwear, headwear, hair ornaments, jewelry, glasses and makeup (`white_shirt`, `pleated_skirt`, `school_uniform`, `hair_ribbon`).
 
-`Replace stripped clothing with my own` appears under `Strip clothing & accessories` when that is on. Tick it and type your own clothing tags in **My clothing tags** (commas or new lines, e.g. `hoodie, denim_shorts, sneakers, baseball_cap`). Each kind of garment the post loses is swapped for one of your tags of the same kind, in the same place in the prompt:
+`Replace stripped clothing with my own` appears under `Strip clothing & accessories` when that is on. Tick it and type your own clothing tags in **My clothing tags** (commas or new lines, e.g. `hoodie, denim_shorts, sneakers, baseball_cap`). Each kind of garment the post loses is swapped for one of your tags of the same kind, where the stripped tag was:
 
 | Kind | Examples |
 | --- | --- |
@@ -60,7 +60,7 @@ Enable `Only poses` to keep the composition of the random posts (pose, action, e
 | handwear | `gloves`, `mittens`, `wristband` |
 | accessory | everything else: jewelry, glasses, neckwear, makeup |
 
-The kind comes from the tag's last words, so `white_shirt` and `(red hoodie:1.2)` are both tops. A post with `white_shirt, collared_shirt` gets one top, not two; if you list several tops, one is picked at random for each image. A dress can stand in for a stripped top and skirt, and a top plus a bottom for a stripped dress. If none of your tags fits a stripped top, bottom or dress, one of your tags is picked at random instead, so the figure isn't left undressed by accident. Accessories are only replaced by your own accessories. Only what was stripped is replaced: a `nude` post stays nude. Your tags are added as you typed them, never stripped again, and left out when the prompt already has them.
+The kind comes from the tag's last words, so `white_shirt` and `(red hoodie:1.2)` are both tops. A post with `white_shirt, collared_shirt` gets one top, not two; if you list several tops, one is picked at random for each image. The outfit is either one full-body garment or a top and/or bottom, never both: a stripped dress gets one of your dresses if you listed one, otherwise a top and a bottom; a stripped top or skirt gets the same kind, otherwise a dress. If none of your tags fits a stripped top, bottom or dress, one of your tags is picked at random instead, so the figure isn't left undressed by accident. Accessories are only replaced by your own accessories. Only what was stripped is replaced: a `nude` post stays nude. Your tags are added as you typed them (only `Convert "_" to spaces` still applies), are never stripped again, and are left out when the prompt already has them.
 
 Tags from Danbooru's posture, gestures, hands, sexual positions, face (expressions), image composition, focus and character count [tag groups](https://danbooru.donmai.us/wiki_pages/tag_groups) are never removed, so `closed_eyes`, `looking_back`, `hand_in_own_hair` and `skirt_lift` stay.
 

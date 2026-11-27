@@ -69,10 +69,31 @@ class ReplaceClothingTests(unittest.TestCase):
             key = self.ns['prompt_tag_key'](tag)
             self.assertEqual(self.slot(key), slot, tag)
 
-    def test_same_slot_is_replaced_in_place(self):
+    def test_same_kind_goes_where_the_outfit_was(self):
         tags = ['1girl', 'white_shirt', 'sitting', 'pleated_skirt', 'smile']
         out = self.swap(tags, 'hoodie, denim shorts')
-        self.assertEqual(out, ['1girl', 'hoodie', 'sitting', 'denim shorts', 'smile'])
+        self.assertEqual(out, ['1girl', 'hoodie', 'denim shorts', 'sitting', 'smile'])
+        tags = ['white_shirt', 'sitting', 'black_thighhighs', 'smile', 'loafers']
+        out = self.swap(tags, 'hoodie, sneakers, kneehighs')
+        self.assertEqual(out, ['hoodie', 'sitting', 'kneehighs', 'smile', 'sneakers'])
+
+    def test_never_a_dress_and_a_top_together(self):
+        for seed in range(20):
+            out = self.swap(['school_uniform', 'white_shirt', 'pleated_skirt', 'sitting'],
+                            'sundress, hoodie, jeans', seed=seed)
+            self.assertEqual(out, ['sundress', 'sitting'])
+            out = self.swap(['white_shirt', 'pleated_skirt', 'sitting'],
+                            'hoodie, sundress', seed=seed)
+            self.assertEqual(out, ['hoodie', 'sitting'])
+
+    def test_apron_and_armor_are_not_outfits(self):
+        self.assertEqual(self.slot('apron'), 'accessory')
+        self.assertEqual(self.slot('shoulder_armor'), 'accessory')
+        for tag in ('sweater_guard', 'shirt_stay', 'clitoral_hood_piercing',
+                    'corset_piercing', 'glove_cutout'):
+            self.assertEqual(self.slot(tag), 'accessory', tag)
+        self.assertEqual(self.slot('hat_ornament'), 'headwear')
+        self.assertEqual(self.slot('glove_cuffs'), 'handwear')
 
     def test_one_replacement_per_slot(self):
         tags = ['white_shirt', 'collared_shirt', 'long_sleeves', 'sitting']
@@ -98,6 +119,10 @@ class ReplaceClothingTests(unittest.TestCase):
     def test_random_fallback_for_body_garments(self):
         out = self.swap(['1girl', 'white_shirt', 'sitting'], 'sneakers')
         self.assertEqual(out, ['1girl', 'sneakers', 'sitting'])
+        # The random fallback can be any of the user's tags.
+        seen = {self.swap(['white_shirt'], 'sneakers, earrings', seed=s)[0]
+                for s in range(40)}
+        self.assertEqual(seen, {'sneakers', 'earrings'})
 
     def test_no_fallback_for_accessory_only_posts(self):
         out = self.swap(['nude', 'earrings', 'sitting'], 'hoodie')

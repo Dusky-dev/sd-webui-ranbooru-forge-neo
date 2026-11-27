@@ -440,6 +440,10 @@ class ForgeHarnessTests(unittest.TestCase):
         self.assertNotIn('pleated_skirt', prompt)
         self.assertIn('sitting', prompt)
         # Off, or strip off: the box is ignored.
+        with open(self.state_file, encoding='utf-8') as handle:
+            saved = json.load(handle)['tabs']['txt2img']
+        self.assertIs(saved['replace_clothing'], True)
+        self.assertEqual(saved['clothing_tags'], mine)
         prompt = fetched(strip_clothing=True, replace_clothing=False, clothing_tags=mine)
         self.assertNotIn('hoodie', prompt)
         self.assertNotIn('white_shirt', prompt)
