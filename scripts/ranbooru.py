@@ -147,6 +147,8 @@ RANBOORU_STATE_FIELDS = (
     'use_cache',
     'only_poses',
     'strip_clothing',
+    'replace_clothing',
+    'clothing_tags',
     'names_all_boorus',
     'skip_prompt_tags',
     'save_credentials',
@@ -714,6 +716,181 @@ def post_category_tags(post):
             if isinstance(values, list):
                 found.extend(v for v in values if isinstance(v, str))
     return {_normalize_pose_tag(tag) for tag in found if tag.strip()}
+
+
+# Replace stripped clothing: which part of the outfit a garment covers,
+# found by its last one to three words (white_shirt -> shirt -> top).
+CLOTHING_SLOT_NOUNS = {
+    'top': (
+        'shirt shirts t-shirt blouse top tops topwear sweater hoodie jacket '
+        'coat cardigan vest tank_top crop_top tube_top camisole sweatshirt '
+        'blazer parka cape capelet poncho tunic serafuku jersey bra '
+        'bikini_top sarashi corset tailcoat raincoat overcoat trench_coat '
+        'trenchcoat windbreaker shawl bolero undershirt bustier haori hanten '
+        'pullover sports_bra waistcoat peacoat cloak surcoat sukajan '
+        'rash_guard shrug happi chanchanko dotera shirtwaist'
+    ),
+    'bottom': (
+        'skirt skirts miniskirt microskirt pants trousers shorts jeans '
+        'bottomwear leggings hakama panties briefs boxers thong loincloth '
+        'bloomers buruma sweatpants hotpants bikini_bottom fundoshi g-string '
+        'skort culottes sarong pelvic_curtain overskirt underskirt '
+        'boxer_briefs jorts capri_pants bike_shorts dolphin_shorts kilt tutu '
+        'petticoat bell-bottoms jammers speedo swimming_trunks jockstrap '
+        'daisy_dukes underwear knickers breechcloth'
+    ),
+    'full': (
+        'dress dresses swimsuit bodysuit leotard jumpsuit overalls kimono '
+        'yukata uniform outfit costume robe gown bikini sundress romper '
+        'unitard pajamas nightgown babydoll lingerie qipao cheongsam '
+        'hanfu hanbok plugsuit wetsuit chemise teddy suit tuxedo habit '
+        'cassock dirndl spacesuit catsuit tracksuit swimwear bathrobe '
+        'kigurumi onesie fursuit coveralls bikesuit springsuit bodystocking '
+        'tankini gakuran negligee furisode uchikake sharkini wrestling_singlet '
+        'ao_dai clothes'
+    ),
+    'legwear': (
+        'thighhighs pantyhose socks kneehighs over-kneehighs hiphighs legwear '
+        'stockings leg_warmers tights garter_belt garter_straps fishnets '
+        'thigh_highs thigh_socks loose_socks tabi bobby_socks'
+    ),
+    'footwear': (
+        'shoes boots sandals sneakers heels high_heels footwear slippers '
+        'loafers pumps geta zouri clogs flats moccasins okobo waraji uwabaki '
+        'mary_janes crocs flip-flops flip_flops oxfords converse'
+    ),
+    'headwear': (
+        'hat cap beret beanie hood helmet headwear headband hairband crown '
+        'tiara veil bonnet headdress headpiece hachimaki bandana bandanna '
+        'kerchief headkerchief headscarf fedora sombrero turban hijab circlet '
+        'hair_ornament hair_ribbon hair_bow hair_flower hairclip hairpin '
+        'kanzashi headgear earmuffs visor helm trilby kepi tricorne bicorne '
+        'ushanka mortarboard nightcap'
+    ),
+    'handwear': (
+        'gloves glove mittens handwear wristband wristbands bracer bracers '
+        'arm_warmers armwear gauntlets vambraces wrist_cuffs'
+    ),
+}
+CLOTHING_NOUN_SLOT = {
+    noun: slot
+    for slot, nouns in CLOTHING_SLOT_NOUNS.items()
+    for noun in nouns.split()
+}
+CLOTHING_SLOT_ORDER = (*CLOTHING_SLOT_NOUNS, 'accessory')
+CLOTHING_TRIM_WORDS = frozenset((
+    'ornament', 'ornaments', 'bow', 'ribbon', 'flower', 'feather', 'tassel',
+    'cuffs', 'bell', 'garter', 'set', 'clothing',
+))
+# Anything else (jewelry, eyewear, makeup, neckwear) is an accessory.
+CLOTHING_OTHER_SLOT = 'accessory'
+# Slots that leave a figure undressed when stripped; the random fallback
+# only fills these, so `nude, earrings` posts are not given a shirt.
+CLOTHING_BODY_SLOTS = ('top', 'bottom', 'full')
+
+
+def clothing_slot(tag):
+    """Outfit slot of a clothing tag: top, bottom, full, legwear, footwear,
+    headwear, handwear or accessory."""
+    norm = POSE_QUALIFIER_PATTERN.sub('', _normalize_pose_tag(tag)).strip('_')
+    words = norm.split('_')
+    # lipstick_mark_on_clothes, bra_on_head: a mark or a placement, not
+    # something worn as that garment.
+    if 'on' in words[1:-1]:
+        return CLOTHING_OTHER_SLOT
+    ends = [len(words)]
+    # Then without a trailing trim word: hat_ornament, glove_cuffs,
+    # boxers_clothing (a prompt tag's `boxers \(clothing\)` loses its
+    # parentheses). Not for any word: sweater_guard is no sweater.
+    if words[-1] in CLOTHING_TRIM_WORDS:
+        ends.append(len(words) - 1)
+    for end in ends:
+        for size in (3, 2, 1):
+            if end >= size:
+                slot = CLOTHING_NOUN_SLOT.get('_'.join(words[end - size:end]))
+                if slot:
+                    return slot
+    return CLOTHING_OTHER_SLOT
+
+
+def swap_clothing_tags(tags, replacements, is_clothing, rng=random, taken=()):
+    """Drop the clothing tags and put the user's own clothing in their place.
+
+    The body outfit is chosen once per prompt: one full-body garment, or a
+    top and/or a bottom, never both. A stripped dress prefers one of the
+    user's dresses, then a top plus a bottom; a stripped top or bottom
+    prefers the same kind, then a dress. If nothing fits, one random tag of
+    the user's is used, so a stripped garment never leaves the figure
+    undressed. These go where the first body garment was. Other kinds
+    (legwear, shoes, ...) get one tag of the same kind each, in place.
+    Replacements whose tag is in `taken` (already in the prompt) are
+    skipped; replacement text is kept as the user typed it.
+    """
+    taken = set(taken)
+    pool = []
+    for text in replacements:
+        key = prompt_tag_key(text)
+        if key and key not in taken and key not in (k for _, k, _ in pool):
+            pool.append((text, key, clothing_slot(key)))
+    if not pool:
+        return [tag for tag in tags if not is_clothing(tag)]
+
+    used = set()
+
+    def pick(slot):
+        choices = [item for item in pool
+                   if (slot is None or item[2] == slot) and item[1] not in used]
+        if not choices:
+            return None
+        text, key, _ = rng.choice(choices)
+        used.add(key)
+        return text
+
+    # Where each stripped kind was: (index among the kept tags, order).
+    kept = []
+    places = {}
+    for tag in tags:
+        if not is_clothing(tag):
+            kept.append(tag)
+            continue
+        slot = clothing_slot(tag)
+        place = 'body' if slot in CLOTHING_BODY_SLOTS else slot
+        places.setdefault(place, (len(kept), len(places)))
+        places.setdefault(slot, None)
+
+    # Pick in a fixed order, not the post's tag order, so the same rng seed
+    # gives the same clothes however the tags were shuffled (Same prompt).
+    chosen = {}
+    for slot in CLOTHING_SLOT_ORDER:
+        if slot in places and slot not in CLOTHING_BODY_SLOTS:
+            text = pick(slot)
+            if text is not None:
+                chosen[slot] = [text]
+    if 'body' in places:
+        has = {item[2] for item in pool}
+        halves = [s for s in ('top', 'bottom') if s in places]
+        if 'full' in places and 'full' in has:
+            outfit = [pick('full')]
+        elif halves and any(s in has for s in halves):
+            outfit = [pick(s) for s in halves]
+        elif 'full' in places:
+            outfit = [pick('top'), pick('bottom')]
+        else:
+            outfit = [pick('full')]
+        outfit = [text for text in outfit if text]
+        if not outfit:
+            outfit = [pick(None)]
+        chosen['body'] = [text for text in outfit if text]
+
+    inserts = {}
+    for place, texts in sorted(chosen.items(), key=lambda item: places[item[0]][1]):
+        inserts.setdefault(places[place][0], []).extend(texts)
+    result = []
+    for index in range(len(kept) + 1):
+        result.extend(inserts.get(index, ()))
+        if index < len(kept):
+            result.append(kept[index])
+    return result
 
 
 pose_tag_groups = load_pose_tag_groups(
@@ -2713,6 +2890,22 @@ class Script(scripts.Script):
                 value=saved_value('strip_clothing', False)
             )
 
+            replace_clothing = gr.Checkbox(
+                label="Replace stripped clothing with my own",
+                info="Each stripped top, bottom, dress, legwear, shoes, headwear, gloves or accessory is swapped for one of your tags of the same kind; if none fits a stripped top/bottom/dress, a random one of your tags is used",
+                value=saved_value('replace_clothing', False),
+                visible=bool(saved_value('strip_clothing', False))
+            )
+
+            clothing_tags = gr.Textbox(
+                lines=2,
+                label="My clothing tags",
+                placeholder="e.g. hoodie, denim_shorts, sneakers, baseball_cap",
+                value=saved_value('clothing_tags', ''),
+                visible=bool(saved_value('strip_clothing', False)
+                             and saved_value('replace_clothing', False))
+            )
+
             names_all_boorus = gr.Checkbox(
                 label="Experimental: strip Danbooru name list on every booru",
                 info="With Only poses, also removes Danbooru's ~35k most-used character, copyright and artist names on boorus other than Gelbooru",
@@ -2900,6 +3093,21 @@ class Script(scripts.Script):
 
             # .change (not .input) so the fields follow the booru however it
             # is set, and never keep one site's key while another is selected.
+            strip_clothing.change(
+                fn=lambda strip, replace: (
+                    gr.update(visible=strip),
+                    gr.update(visible=bool(strip and replace)),
+                ),
+                inputs=[strip_clothing, replace_clothing],
+                outputs=[replace_clothing, clothing_tags]
+            )
+
+            replace_clothing.change(
+                fn=lambda strip, replace: gr.update(visible=bool(strip and replace)),
+                inputs=[strip_clothing, replace_clothing],
+                outputs=[clothing_tags]
+            )
+
             booru.change(
                 fn=self.load_booru_credentials,
                 inputs=[booru],
@@ -2941,6 +3149,8 @@ class Script(scripts.Script):
             use_cache,
             only_poses,
             strip_clothing,
+            replace_clothing,
+            clothing_tags,
             names_all_boorus,
             skip_prompt_tags,
             api_key,
@@ -3037,6 +3247,13 @@ class Script(scripts.Script):
                     results.append(gr.update(
                         value=value, visible=(current_booru == 'gelbooru')
                     ))
+                elif name in ('replace_clothing', 'clothing_tags'):
+                    # Shown only under Strip clothing (and Replace, for the box).
+                    shown = state.get('strip_clothing') is True and (
+                        name == 'replace_clothing'
+                        or state.get('replace_clothing') is True
+                    )
+                    results.append(gr.update(value=value, visible=shown))
                 else:
                     results.append(gr.update(value=value))
 
@@ -3099,6 +3316,8 @@ class Script(scripts.Script):
         use_cache,
         only_poses,
         strip_clothing,
+        replace_clothing,
+        clothing_tags,
         names_all_boorus,
         skip_prompt_tags,
         api_key,
@@ -3564,6 +3783,15 @@ class Script(scripts.Script):
 
             new_prompts = []
 
+            # Replace stripped clothing: the user's own tags, when turned on.
+            own_clothing = (
+                parse_tag_list(clothing_tags)
+                if strip_clothing and replace_clothing else []
+            )
+            # Same prompt: every image gets the same clothes.
+            clothing_seed = random.random()
+            own_clothing_taken = prompt_tag_keys(self.original_prompt)
+
             # Tags the user already typed (Skip tags already in prompt).
             typed_tag_keys = (
                 prompt_tag_keys(self.original_prompt)
@@ -3593,12 +3821,27 @@ class Script(scripts.Script):
                 prompt_tags = filter_pose_tags(
                     prompt_tags,
                     strip_traits=only_poses,
-                    strip_clothing=strip_clothing,
+                    strip_clothing=strip_clothing and not own_clothing,
                     excluded=pose_excluded_tags,
                     names=pose_names,
                     qualifiers=pose_qualifiers,
                     e621_vocab=isinstance(api_url, e621)
                 )
+
+                # After every other filter, so the user's own clothing is
+                # never stripped again.
+                if own_clothing:
+                    prompt_tags = swap_clothing_tags(
+                        prompt_tags,
+                        own_clothing,
+                        lambda tag: is_characteristic_tag(
+                            tag, strip_traits=False, strip_clothing=True,
+                            e621_vocab=isinstance(api_url, e621)
+                        ),
+                        rng=(random.Random(clothing_seed)
+                             if same_prompt else random),
+                        taken=own_clothing_taken,
+                    )
 
                 new_prompt = ', '.join(tag.strip() for tag in prompt_tags if tag.strip())
 
@@ -3765,6 +4008,8 @@ class Script(scripts.Script):
         use_cache,
         only_poses,
         strip_clothing,
+        replace_clothing,
+        clothing_tags,
         names_all_boorus,
         skip_prompt_tags,
         api_key,

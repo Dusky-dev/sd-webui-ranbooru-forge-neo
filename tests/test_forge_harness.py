@@ -301,7 +301,8 @@ class ForgeHarnessTests(unittest.TestCase):
         values.update(enabled=True, booru='safebooru', tags='1girl', max_pages=5,
                       use_cache=False, remove_tags='', api_key='', user_id='', post_id='',
                       use_img2img=False, use_ip=False, same_prompt=False,
-                      only_poses=False, strip_clothing=False, shuffle_tags=False)
+                      only_poses=False, strip_clothing=False, replace_clothing=False,
+                      clothing_tags='', shuffle_tags=False)
         values.update(overrides)
         return [values[name] for name in names]
 
@@ -412,6 +413,90 @@ class ForgeHarnessTests(unittest.TestCase):
                              expect_removed, fetched)
             self.assertIn('sitting', fetched)
 
+    def test_replace_stripped_clothing(self):
+        script = self.rb.Script()
+        tags = '1girl solo white_shirt pleated_skirt sitting'
+        posts = [{'id': 300 + i, 'image': f'{i}.png', 'directory': '12', 'score': i,
+                  'file_url': f'https://safebooru.org/images/12/{i}.png', 'tags': tags}
+                 for i in range(6)]
+
+        def clothed_get(url, *args, **kwargs):
+            if 'limit=0' in url or '/images/' in url:
+                return fake_get(url, *args, **kwargs)
+            return Reply(text=json.dumps(posts), data=posts)
+
+        def fetched(**overrides):
+            p = self.processing(1, 1)
+            with mock.patch.object(self.rb.requests, 'get', side_effect=clothed_get), \
+                    mock.patch('sys.stdout', new=io.StringIO()):
+                script.before_process(p, *self.values(**overrides))
+            return p.prompt.split('masterpiece', 1)[1]
+
+        mine = 'hoodie, denim shorts'
+        prompt = fetched(strip_clothing=True, replace_clothing=True, clothing_tags=mine)
+        self.assertIn('hoodie', prompt)
+        self.assertIn('denim shorts', prompt)
+        self.assertNotIn('white_shirt', prompt)
+        self.assertNotIn('pleated_skirt', prompt)
+        self.assertIn('sitting', prompt)
+        # Off, or strip off: the box is ignored.
+        with open(self.state_file, encoding='utf-8') as handle:
+            saved = json.load(handle)['tabs']['txt2img']
+        self.assertIs(saved['replace_clothing'], True)
+        self.assertEqual(saved['clothing_tags'], mine)
+        prompt = fetched(strip_clothing=True, replace_clothing=False, clothing_tags=mine)
+        self.assertNotIn('hoodie', prompt)
+        self.assertNotIn('white_shirt', prompt)
+        prompt = fetched(strip_clothing=False, replace_clothing=True, clothing_tags=mine)
+        self.assertNotIn('hoodie', prompt)
+        self.assertIn('white_shirt', prompt)
+
+        # Same prompt: one set of clothes for every image of the run.
+        tops = ['hoodie', 'tank_top', 'sweater', 'blazer']
+        for _ in range(5):
+            p = self.processing(2, 2)
+            with mock.patch.object(self.rb.requests, 'get', side_effect=clothed_get), \
+                    mock.patch('sys.stdout', new=io.StringIO()):
+                script.before_process(p, *self.values(
+                    same_prompt=True, shuffle_tags=True, strip_clothing=True,
+                    replace_clothing=True, clothing_tags=', '.join(tops)))
+            prompts = p.prompt if isinstance(p.prompt, list) else [p.prompt]
+            worn = {tuple(t for t in tops if t in prompt) for prompt in prompts}
+            self.assertEqual(len(worn), 1, prompts)
+            self.assertEqual(len(next(iter(worn))), 1, prompts)
+
+    def test_clothing_box_follows_its_checkboxes(self):
+        demo, controls = self.ui[False]
+        names = self.param_names('before_process')
+        strip = controls[names.index('strip_clothing')]
+        replace = controls[names.index('replace_clothing')]
+        strip_handler = self.handlers_for(demo, strip)[0]
+        replace_handler = self.handlers_for(demo, replace)[0]
+        shown, box = strip_handler.fn(True, True)
+        self.assertTrue(shown['visible'])
+        self.assertTrue(box['visible'])
+        shown, box = strip_handler.fn(False, True)
+        self.assertFalse(shown['visible'])
+        self.assertFalse(box['visible'])
+        self.assertFalse(replace_handler.fn(True, False)['visible'])
+        self.assertTrue(replace_handler.fn(True, True)['visible'])
+        # A browser reload restores the visibility along with the values.
+        restore = [fn for fn in self.functions(demo)
+                   if getattr(fn.fn, '__name__', '') == 'restore_browser_page'][0]
+        outputs = [block._id for block in restore.outputs]
+        for strip_on, replace_on in ((True, True), (True, False), (False, True)):
+            with open(self.state_file, 'w', encoding='utf-8') as handle:
+                json.dump({'tabs': {'txt2img': {
+                    'strip_clothing': strip_on, 'replace_clothing': replace_on,
+                    'clothing_tags': 'hoodie'}}}, handle)
+            with mock.patch('sys.stdout', new=io.StringIO()):
+                results = restore.fn()
+            box = controls[names.index('clothing_tags')]
+            self.assertEqual(results[outputs.index(replace._id)]['visible'], strip_on)
+            self.assertEqual(results[outputs.index(box._id)]['visible'],
+                             strip_on and replace_on)
+            self.assertEqual(results[outputs.index(box._id)]['value'], 'hoodie')
+
     def test_img2img_every_batch_size_and_count(self):
         for batch, n_iter, last in ((1, 1, False), (2, 1, False), (1, 2, False),
                                     (2, 2, False), (2, 3, True)):
@@ -478,7 +563,10 @@ class ForgeHarnessTests(unittest.TestCase):
                 self.assert_images_match_prompts()
 
     def test_failed_download_swaps_in_another_post(self):
-        FAILING_IMAGES.update({0, 1, 2})
+        # Two, not three: three failures before any image loads means the
+        # host is down (max_failures_first), which a random draw of three
+        # failing posts out of six would trip now and then.
+        FAILING_IMAGES.update({0, 1})
         try:
             for _ in range(5):
                 self.generate(2, 2, use_img2img=True)

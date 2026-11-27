@@ -32,7 +32,7 @@ Gelbooru (since June 2025) and Rule34 require an API key and user ID; e621 works
 - **Mature Rating**: This sets the mature rating of the booru. This is useful if you want to get only SFW or NSFW tags. It only works on supported boorus (right now it has been tested only on Gelbooru).
 - **Remove Bad Tags**: This remove tags that you usually don't need (watermarks,text,censor)
 - **Shuffle Tags**: This shuffle the tags before adding them to the text.
-- **Only poses**: Removes appearance tags (hair, eyes, skin, body traits) plus character, copyright and artist names, keeping pose, expression and composition tags. **Strip clothing & accessories** also removes outfits and accessories. See [usage.md](usage.md#only-poses) for what each booru supports.
+- **Only poses**: Removes appearance tags (hair, eyes, skin, body traits) plus character, copyright and artist names, keeping pose, expression and composition tags. **Strip clothing & accessories** also removes outfits and accessories, and **Replace stripped clothing with my own** puts your own clothing tags in their place, matched by kind (top, bottom, dress, shoes, ...). See [usage.md](usage.md#only-poses) for what each booru supports.
 - **Skip tags already in prompt** (off by default): Leaves out fetched tags you already typed. Weights and attention brackets are ignored, so `(blue hair:1.2)` in your prompt skips a fetched `blue_hair`; LoRA tags are ignored.
 - **Convert** "\_" to Spaces": This convert \_ to spaces in the tags.
 - **Use the same prompt for all images**: This use the same prompt for all the generated images in the same batch. If not selected, each image will have a different prompt.
