@@ -549,7 +549,10 @@ class ForgeHarnessTests(unittest.TestCase):
                 self.assert_images_match_prompts()
 
     def test_failed_download_swaps_in_another_post(self):
-        FAILING_IMAGES.update({0, 1, 2})
+        # Two, not three: three failures before any image loads means the
+        # host is down (max_failures_first), which a random draw of three
+        # failing posts out of six would trip now and then.
+        FAILING_IMAGES.update({0, 1})
         try:
             for _ in range(5):
                 self.generate(2, 2, use_img2img=True)
