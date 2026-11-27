@@ -747,7 +747,7 @@ CLOTHING_SLOT_NOUNS = {
         'cassock dirndl spacesuit catsuit tracksuit swimwear bathrobe '
         'kigurumi onesie fursuit coveralls bikesuit springsuit bodystocking '
         'tankini gakuran negligee furisode uchikake sharkini wrestling_singlet '
-        'ao_dai'
+        'ao_dai clothes'
     ),
     'legwear': (
         'thighhighs pantyhose socks kneehighs over-kneehighs hiphighs legwear '
@@ -777,6 +777,7 @@ CLOTHING_NOUN_SLOT = {
     for slot, nouns in CLOTHING_SLOT_NOUNS.items()
     for noun in nouns.split()
 }
+CLOTHING_SLOT_ORDER = (*CLOTHING_SLOT_NOUNS, 'accessory')
 CLOTHING_TRIM_WORDS = frozenset((
     'ornament', 'ornaments', 'bow', 'ribbon', 'flower', 'feather', 'tassel',
     'cuffs', 'bell', 'garter', 'set', 'clothing',
@@ -793,6 +794,10 @@ def clothing_slot(tag):
     headwear, handwear or accessory."""
     norm = POSE_QUALIFIER_PATTERN.sub('', _normalize_pose_tag(tag)).strip('_')
     words = norm.split('_')
+    # lipstick_mark_on_clothes, bra_on_head: a mark or a placement, not
+    # something worn as that garment.
+    if 'on' in words[1:-1]:
+        return CLOTHING_OTHER_SLOT
     ends = [len(words)]
     # Then without a trailing trim word: hat_ornament, glove_cuffs,
     # boxers_clothing (a prompt tag's `boxers \(clothing\)` loses its
@@ -841,38 +846,50 @@ def swap_clothing_tags(tags, replacements, is_clothing, rng=random, taken=()):
         used.add(key)
         return text
 
-    result = []
-    stripped = set()
-    body_index = None  # where the first body garment was
+    # Where each stripped kind was: (index among the kept tags, order).
+    kept = []
+    places = {}
     for tag in tags:
         if not is_clothing(tag):
-            result.append(tag)
+            kept.append(tag)
             continue
         slot = clothing_slot(tag)
-        if slot in CLOTHING_BODY_SLOTS:
-            if body_index is None:
-                body_index = len(result)
-        elif slot not in stripped:
-            chosen = pick(slot)
-            if chosen is not None:
-                result.append(chosen)
-        stripped.add(slot)
+        place = 'body' if slot in CLOTHING_BODY_SLOTS else slot
+        places.setdefault(place, (len(kept), len(places)))
+        places.setdefault(slot, None)
 
-    if body_index is not None:
+    # Pick in a fixed order, not the post's tag order, so the same rng seed
+    # gives the same clothes however the tags were shuffled (Same prompt).
+    chosen = {}
+    for slot in CLOTHING_SLOT_ORDER:
+        if slot in places and slot not in CLOTHING_BODY_SLOTS:
+            text = pick(slot)
+            if text is not None:
+                chosen[slot] = [text]
+    if 'body' in places:
         has = {item[2] for item in pool}
-        halves = [s for s in ('top', 'bottom') if s in stripped]
-        if 'full' in stripped and 'full' in has:
+        halves = [s for s in ('top', 'bottom') if s in places]
+        if 'full' in places and 'full' in has:
             outfit = [pick('full')]
         elif halves and any(s in has for s in halves):
             outfit = [pick(s) for s in halves]
-        elif 'full' in stripped:
+        elif 'full' in places:
             outfit = [pick('top'), pick('bottom')]
         else:
             outfit = [pick('full')]
         outfit = [text for text in outfit if text]
         if not outfit:
             outfit = [pick(None)]
-        result[body_index:body_index] = [text for text in outfit if text]
+        chosen['body'] = [text for text in outfit if text]
+
+    inserts = {}
+    for place, texts in sorted(chosen.items(), key=lambda item: places[item[0]][1]):
+        inserts.setdefault(places[place][0], []).extend(texts)
+    result = []
+    for index in range(len(kept) + 1):
+        result.extend(inserts.get(index, ()))
+        if index < len(kept):
+            result.append(kept[index])
     return result
 
 
@@ -3771,6 +3788,9 @@ class Script(scripts.Script):
                 parse_tag_list(clothing_tags)
                 if strip_clothing and replace_clothing else []
             )
+            # Same prompt: every image gets the same clothes.
+            clothing_seed = random.random()
+            own_clothing_taken = prompt_tag_keys(self.original_prompt)
 
             # Tags the user already typed (Skip tags already in prompt).
             typed_tag_keys = (
@@ -3818,7 +3838,9 @@ class Script(scripts.Script):
                             tag, strip_traits=False, strip_clothing=True,
                             e621_vocab=isinstance(api_url, e621)
                         ),
-                        taken=prompt_tag_keys(self.original_prompt),
+                        rng=(random.Random(clothing_seed)
+                             if same_prompt else random),
+                        taken=own_clothing_taken,
                     )
 
                 new_prompt = ', '.join(tag.strip() for tag in prompt_tags if tag.strip())

@@ -86,12 +86,23 @@ class ReplaceClothingTests(unittest.TestCase):
                             'hoodie, sundress', seed=seed)
             self.assertEqual(out, ['hoodie', 'sitting'])
 
+    def test_same_seed_same_clothes_whatever_the_tag_order(self):
+        tags = ['white_shirt', 'sitting', 'loafers', 'pleated_skirt', 'earrings']
+        mine = 'hoodie, tank_top, jeans, shorts, sneakers, boots, choker, ring'
+        for seed in range(20):
+            first = set(self.swap(tags, mine, seed=seed))
+            again = set(self.swap(list(reversed(tags)), mine, seed=seed))
+            self.assertEqual(first, again)
+
     def test_apron_and_armor_are_not_outfits(self):
         self.assertEqual(self.slot('apron'), 'accessory')
         self.assertEqual(self.slot('shoulder_armor'), 'accessory')
         for tag in ('sweater_guard', 'shirt_stay', 'clitoral_hood_piercing',
                     'corset_piercing', 'glove_cutout'):
             self.assertEqual(self.slot(tag), 'accessory', tag)
+        for tag in ('lipstick_mark_on_clothes', 'panties_on_head'):
+            self.assertEqual(self.slot(tag), 'accessory', tag)
+        self.assertEqual(self.slot('japanese_clothes'), 'full')
         self.assertEqual(self.slot('hat_ornament'), 'headwear')
         self.assertEqual(self.slot('glove_cuffs'), 'handwear')
 

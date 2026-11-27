@@ -451,6 +451,20 @@ class ForgeHarnessTests(unittest.TestCase):
         self.assertNotIn('hoodie', prompt)
         self.assertIn('white_shirt', prompt)
 
+        # Same prompt: one set of clothes for every image of the run.
+        tops = ['hoodie', 'tank_top', 'sweater', 'blazer']
+        for _ in range(5):
+            p = self.processing(2, 2)
+            with mock.patch.object(self.rb.requests, 'get', side_effect=clothed_get), \
+                    mock.patch('sys.stdout', new=io.StringIO()):
+                script.before_process(p, *self.values(
+                    same_prompt=True, shuffle_tags=True, strip_clothing=True,
+                    replace_clothing=True, clothing_tags=', '.join(tops)))
+            prompts = p.prompt if isinstance(p.prompt, list) else [p.prompt]
+            worn = {tuple(t for t in tops if t in prompt) for prompt in prompts}
+            self.assertEqual(len(worn), 1, prompts)
+            self.assertEqual(len(next(iter(worn))), 1, prompts)
+
     def test_clothing_box_follows_its_checkboxes(self):
         demo, controls = self.ui[False]
         names = self.param_names('before_process')
